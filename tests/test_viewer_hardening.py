@@ -123,14 +123,23 @@ def test_post_requires_json_content_type(viewer: tuple) -> None:
 
 
 def test_oversized_body_is_rejected(viewer: tuple) -> None:
+    """The server refuses on the declared length, before reading any body.
+
+    Only the headers are sent: streaming the whole oversized body would race
+    the server closing the connection after its 413 (a broken pipe on CI).
+    """
     _, url, token, delivered = viewer
-    status, _ = _request(
-        url,
-        "POST",
-        "/api/agents/steer",
-        headers={"Content-Type": "application/json", "Cookie": _cookie(url, token)},
-        body=b" " * (MAX_BODY_BYTES + 1),
-    )
+    parts = urlsplit(url)
+    conn = http.client.HTTPConnection(parts.hostname, parts.port, timeout=5)
+    try:
+        conn.putrequest("POST", "/api/agents/steer")
+        conn.putheader("Content-Type", "application/json")
+        conn.putheader("Cookie", _cookie(url, token))
+        conn.putheader("Content-Length", str(MAX_BODY_BYTES + 1))
+        conn.endheaders()
+        status = conn.getresponse().status
+    finally:
+        conn.close()
     assert status == 413
     assert delivered == []
 
