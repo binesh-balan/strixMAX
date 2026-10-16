@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import io
 import tarfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +13,7 @@ import pytest
 from agents.sandbox.entries import LocalDir
 from agents.sandbox.manifest import Manifest
 
+from strix.config.settings import IntegrationSettings
 from strix.runtime import session_manager
 from strix.runtime.backends import (
     _BACKENDS,
@@ -320,6 +321,7 @@ class _RuntimeSettings:
 @dataclass
 class _Settings:
     runtime: _RuntimeSettings
+    integrations: IntegrationSettings = field(default_factory=IntegrationSettings)
 
 
 @dataclass
