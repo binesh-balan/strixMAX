@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from agents import RunContextWrapper, function_tool
 from caido_sdk_client import BaseError
 
+from strix.core.scope import OutOfScopeError, scope_policy_from_context
 from strix.runtime.caido_handle import CaidoBootstrapHandle
 from strix.tools.nullish import clean_optional
 from strix.tools.proxy import caido_api
@@ -417,7 +418,10 @@ async def repeat_request(
         request_id: ID of the original request (from ``list_requests``).
         modifications: Patch dict. Recognized keys:
 
-            - ``url`` — replace the URL.
+            - ``url`` — replace the URL. Must stay within the scan's
+              authorized targets. When the host changes, credentials the
+              original request carried (Authorization, Cookie, API-key
+              headers) are not forwarded unless you set them explicitly.
             - ``params`` — dict of query-string keys to add/update.
             - ``headers`` — dict of headers to add/update.
             - ``body`` — replace the body string entirely.
@@ -427,6 +431,7 @@ async def repeat_request(
     if client is None:
         return _no_client()
     mods = modifications or {}
+    policy = scope_policy_from_context(ctx.context)
 
     async def _do(client: Client) -> dict[str, Any] | None:
         result = await caido_api.get_request_with_client(client, request_id, part="request")
@@ -435,8 +440,19 @@ async def repeat_request(
         original = result.request
         raw_str = result.request.raw.decode("utf-8", errors="replace")
         components = caido_api.parse_raw_request(raw_str)
+        original_url = caido_api.full_url_from_components(original, components, {})
         full_url = caido_api.full_url_from_components(original, components, mods)
         modified = caido_api.apply_modifications(components, mods, full_url)
+        if not policy.allows_url(modified["url"]):
+            raise OutOfScopeError(modified["url"], policy)
+        explicit: dict[str, Any] = dict(mods.get("headers") or {})
+        if "cookies" in mods:
+            explicit["Cookie"] = ""
+        modified["headers"], dropped = caido_api.strip_credentials_on_host_change(
+            original_url, modified["url"], modified["headers"], explicit
+        )
+        if dropped:
+            logger.info("repeat_request: dropped %s for cross-host replay", dropped)
         connection, raw = caido_api.build_raw_request(
             method=modified["method"],
             url=modified["url"],
@@ -454,6 +470,8 @@ async def repeat_request(
                 default=str,
             )
         return _format_replay_tool_result(replay)
+    except OutOfScopeError as exc:
+        return json.dumps({"success": False, "error": str(exc)}, ensure_ascii=False)
     except Exception as exc:  # noqa: BLE001
         return _err("repeat_request", exc)
 

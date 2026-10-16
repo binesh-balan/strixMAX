@@ -274,6 +274,17 @@ Strix Cloud:
     )
 
     parser.add_argument(
+        "--writable-source",
+        dest="writable_source",
+        action="store_true",
+        default=False,
+        help=(
+            "Mount local source targets read-write. By default they are read-only so "
+            "the agent cannot change files in your checkout."
+        ),
+    )
+
+    parser.add_argument(
         "--max-budget",
         "--max-budget-usd",
         dest="max_budget_usd",
@@ -487,7 +498,13 @@ def load_resume_state(args: argparse.Namespace) -> None:
         cloned = details.get("cloned_repo_path")
         if not cloned:
             continue
-        if not Path(cloned).expanduser().exists():
+        if Path(cloned).expanduser().exists():
+            # run.json is a plain file; an edited path must not widen the mount.
+            try:
+                check_mountable_dir(Path(cloned).expanduser())
+            except ValueError as exc:
+                raise ResumeError(f"--resume {args.resume}: {exc}") from exc
+        else:
             raise ResumeError(
                 f"--resume {args.resume}: cloned repo at {cloned} is missing. "
                 f"It was deleted between runs. Pick a fresh --run-name to "
@@ -498,10 +515,11 @@ def load_resume_state(args: argparse.Namespace) -> None:
         args.instruction = state.get("instruction")
     if not getattr(args, "user_instruction", None):
         args.user_instruction = state.get("user_instruction") or None
-    args.local_sources = collect_local_sources(args.targets_info)
-    # Remount the workspace the run was started with. The user already confirmed
-    # this directory, so the target mount guard does not apply to it; it only has
-    # to still be there.
+    args.local_sources = collect_local_sources(
+        args.targets_info, writable=bool(getattr(args, "writable_source", False))
+    )
+    # Remount the workspace the run was started with. It is checked again by
+    # attach_workspace_mount, since run.json can be edited between runs.
     args.workspace_mount = workspace_mount
 
     # Replace the workspace files the run started with, unless this resume names

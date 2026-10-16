@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import platform
+import re
 import sys
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -45,6 +46,21 @@ def is_first_run() -> bool:
         pass  # nosec B110
     _FIRST_RUN_CACHED = True
     return True
+
+
+_PROVIDER_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,31}$")
+
+
+def model_provider(model: str | None) -> str:
+    """Reduce a model string to its LiteLLM provider prefix (``azure/my-deploy`` -> ``azure``).
+
+    Model and deployment names can be customer-specific, so only the provider
+    prefix ever leaves the machine.
+    """
+    if not model or "/" not in model:
+        return "unknown"
+    provider = model.split("/", 1)[0].strip().lower()
+    return provider if _PROVIDER_RE.fullmatch(provider) else "unknown"
 
 
 def base_props() -> dict[str, Any]:

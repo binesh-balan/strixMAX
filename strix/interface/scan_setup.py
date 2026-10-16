@@ -13,12 +13,14 @@ import asyncio
 import logging
 import unicodedata
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from strix.config import Settings, codex, load_settings
 from strix.core.paths import run_dir_for
 from strix.interface.utils import (
     assign_workspace_subdirs,
+    check_mountable_dir,
     clone_repository,
     collect_local_sources,
     dedupe_local_targets,
@@ -255,7 +257,9 @@ def prepare_run(args: argparse.Namespace) -> None:
             cloned_path = clone_repository(repo_url, args.run_name, dest_name)
             target_info["details"]["cloned_repo_path"] = cloned_path
 
-    args.local_sources = collect_local_sources(args.targets_info)
+    args.local_sources = collect_local_sources(
+        args.targets_info, writable=bool(getattr(args, "writable_source", False))
+    )
     args.local_sources.extend(stage_api_specs(args.targets_info, args.run_name))
     diff_scope = resolve_diff_scope_context(
         local_sources=args.local_sources,
@@ -285,6 +289,9 @@ def attach_workspace_mount(args: argparse.Namespace) -> None:
     mount = getattr(args, "workspace_mount", None)
     if not mount:
         return
+    # Same guard as a local_code target: never hand the agent $HOME, a system
+    # directory or a credentials folder, whichever path the mount came from.
+    check_mountable_dir(Path(mount).expanduser())
     args.workspace_subdir = derive_local_base_name(mount)
     local_sources = list(getattr(args, "local_sources", None) or [])
     local_sources.append(
@@ -292,6 +299,7 @@ def attach_workspace_mount(args: argparse.Namespace) -> None:
             "source_path": mount,
             "workspace_subdir": args.workspace_subdir,
             "protect_metadata": True,
+            "read_only": not getattr(args, "writable_source", False),
         }
     )
     args.local_sources = local_sources

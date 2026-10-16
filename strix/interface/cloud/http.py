@@ -12,7 +12,7 @@ from urllib.parse import SplitResult, urlsplit
 import requests
 
 from strix.config import load_settings
-from strix.interface.platform_cli import read_record
+from strix.interface.platform_cli import is_loopback_hostname, read_record
 
 
 if TYPE_CHECKING:
@@ -172,7 +172,9 @@ def request(
     stream: bool = False,
     idempotency_key: str | None = None,
 ) -> requests.Response:
-    url = f"{app_url()}/api/v1{path}"
+    base_url = app_url()
+    _parse_origin_url(base_url, label="configured platform URL")
+    url = f"{base_url}/api/v1{path}"
     headers = {
         "Authorization": f"Bearer {api_token(token)}",
     }
@@ -310,6 +312,10 @@ def _parse_origin_url(
         raise CloudError(f"{label} contains a non-ASCII hostname") from exc
     if port is not None and not 1 <= port <= 65535:
         raise CloudError(f"{label} is invalid")
+    # Bearer tokens and source archives must not cross the network in clear
+    # text: plain http is only for a platform running on this machine.
+    if parsed.scheme == "http" and not is_loopback_hostname(hostname):
+        raise CloudError(f"{label} must use https (http is only allowed for localhost)")
     return parsed
 
 

@@ -24,6 +24,12 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
+@pytest.fixture(autouse=True)
+def _workspace_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Checkouts in these tests live under tmp_path, which stands in for /workspace."""
+    monkeypatch.setattr(threat_model_tools, "_WORKSPACE_ROOT", tmp_path.resolve())
+
+
 _MODEL = """# Threat Model
 
 ## Overview
@@ -365,3 +371,10 @@ def test_different_repositories_on_one_host_stay_separate(tmp_path: Path) -> Non
     _git(second, "remote", "add", "origin", "git@github.com:acme/payments.git")
 
     assert _get_impl(str(second))["found"] is False
+
+
+def test_host_paths_outside_the_workspace_are_not_probed(tmp_path: Path) -> None:
+    outside = tmp_path.parent / f"{tmp_path.name}-outside"
+    outside.mkdir()
+    assert threat_model_tools._local_directory(str(outside)) is None
+    assert threat_model_tools._local_directory("~") is None

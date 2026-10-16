@@ -137,8 +137,20 @@ affecting the agents that do the actual testing.
   Postman API key (`PMAK-…`). Enables fetching Postman collections by id as a target (`postman://<collection-uid>`), and Postman environments (`postman://<collection-uid>?env=<environment-uid>`) to resolve collection variables. Not needed when passing a local collection export file.
 </ParamField>
 
-<ParamField path="STRIX_TELEMETRY" default="1" type="string">
-  Telemetry toggle. Set to `0`, `false`, `no`, or `off` to disable telemetry (PostHog, Scarf, OTEL).
+<ParamField path="STRIX_TELEMETRY" default="0" type="string">
+  Anonymous usage telemetry (PostHog, Scarf). Off by default; set to `1`, `true`, `yes`, or `on` to opt in. See [what is collected](https://github.com/usestrix/strix/blob/main/strix/telemetry/README.md).
+</ParamField>
+
+<ParamField path="STRIX_UPDATE_CHECK" default="0" type="string">
+  Opt in to the background new-version check (at most once per 24 hours). `STRIX_NO_UPDATE_CHECK=1` or a detected CI environment always turns it off. `strix --update` works regardless.
+</ParamField>
+
+<ParamField path="STRIX_UPDATE_REPO" default="usestrix/strix" type="string">
+  GitHub `owner/name` that the update check and `strix --update` read releases from. Point it at an internal fork. Self-update refuses any release asset without a published sha256 digest.
+</ParamField>
+
+<ParamField path="STRIX_UPDATE_PYPI_PACKAGE" default="strix-agent" type="string">
+  PyPI package name the update check and upgrade hints use for pip/pipx/uv installs.
 </ParamField>
 
 <ParamField path="TRACELOOP_BASE_URL" type="string">
@@ -187,7 +199,7 @@ When remote vars are set, Strix dual-writes telemetry to both local JSONL and th
 
 ## Config File
 
-Strix stores configuration in `~/.strix/cli-config.json`. You can also specify a custom config file:
+Strix stores configuration in `~/.strix/cli-config.json` (mode `0600`). Interactive runs merge the non-secret environment variables you set into it. Secret-bearing variables (anything ending in `_API_KEY`, `_TOKEN`, `_SECRET`, `_PASSWORD`, the `*_EXTRA_HEADERS`/`*_EXTRA_BODY` objects, and base URLs with embedded credentials) are only written when `STRIX_PERSIST_SECRETS=1`. Headless (`-n`) and CI runs never write the file. Values already in the file, including keys you added by hand, keep working. You can also specify a custom config file:
 
 ```bash
 strix --target ./app --config /path/to/config.json

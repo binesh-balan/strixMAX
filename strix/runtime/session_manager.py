@@ -18,6 +18,7 @@ from agents.sandbox.entries import BaseEntry, LocalDir
 from agents.sandbox.manifest import Environment, Manifest
 
 from strix.config import load_settings
+from strix.core.scope import HOST_GATEWAY_HOSTNAME, ScopePolicy, sandbox_egress_env
 from strix.runtime.backends import backend_supports_bind_mounts, get_backend
 from strix.runtime.caido_bootstrap import bootstrap_caido
 from strix.runtime.caido_handle import CaidoBootstrapHandle
@@ -268,6 +269,40 @@ async def _resolve_extra_file_archive(
     return build_extra_file_archive(files, local_sources) if files else None
 
 
+_CONTAINER_CAIDO_URL = f"http://127.0.0.1:{_CONTAINER_CAIDO_PORT}"
+
+
+def _sandbox_environment(scope_policy: ScopePolicy | None) -> Environment:
+    # Caido runs as an in-container sidecar; HTTP(S) traffic from any
+    # process started via ``session.exec`` (the SDK's Shell tool, etc.)
+    # picks up these env vars automatically. ``NO_PROXY`` keeps the
+    # agent-browser CDP daemon's localhost traffic from looping back
+    # through Caido.
+    container_caido_url = _CONTAINER_CAIDO_URL
+    # Read by the container's firewall at start; see
+    # ``strix.core.scope.sandbox_egress_env``.
+    egress_env = sandbox_egress_env(scope_policy or ScopePolicy())
+    if egress_env["STRIX_ALLOW_HOST_GATEWAY"] == "1":
+        # Only advertise the host to the agent when a target lives on it.
+        egress_env["HOST_GATEWAY"] = HOST_GATEWAY_HOSTNAME
+    if os.environ.get("STRIX_DOCKER_SANDBOX_NETWORK", "").strip():
+        egress_env["STRIX_SANDBOX_SHARED_NETWORK"] = "1"
+        egress_env["STRIX_CAIDO_ALLOWED_SOURCES"] = os.environ.get(
+            "STRIX_CAIDO_ALLOWED_SOURCES", ""
+        ).strip()
+    return Environment(
+        value={
+            "PYTHONUNBUFFERED": "1",
+            **_host_identity_env(),
+            **egress_env,
+            "http_proxy": container_caido_url,
+            "https_proxy": container_caido_url,
+            "ALL_PROXY": container_caido_url,
+            "NO_PROXY": "localhost,127.0.0.1",
+        },
+    )
+
+
 async def create_or_reuse(
     scan_id: str,
     *,
@@ -276,6 +311,7 @@ async def create_or_reuse(
     extra_files: list[dict[str, Any]] | Awaitable[list[dict[str, Any]] | None] | None = None,
     status_sink: StatusSink | None = None,
     defer: bool = False,
+    scope_policy: ScopePolicy | None = None,
 ) -> dict[str, Any]:
     """Return the existing session bundle for ``scan_id`` or create a new one.
 
@@ -309,26 +345,8 @@ async def create_or_reuse(
         bind_mounts = []
         entries = build_manifest_entries(local_sources)
 
-    # Caido runs as an in-container sidecar; HTTP(S) traffic from any
-    # process started via ``session.exec`` (the SDK's Shell tool, etc.)
-    # picks up these env vars automatically. ``NO_PROXY`` keeps the
-    # agent-browser CDP daemon's localhost traffic from looping back
-    # through Caido.
-    container_caido_url = f"http://127.0.0.1:{_CONTAINER_CAIDO_PORT}"
-    manifest = Manifest(
-        entries=entries,
-        environment=Environment(
-            value={
-                "PYTHONUNBUFFERED": "1",
-                "HOST_GATEWAY": "host.docker.internal",
-                **_host_identity_env(),
-                "http_proxy": container_caido_url,
-                "https_proxy": container_caido_url,
-                "ALL_PROXY": container_caido_url,
-                "NO_PROXY": "localhost,127.0.0.1",
-            },
-        ),
-    )
+    container_caido_url = _CONTAINER_CAIDO_URL
+    manifest = Manifest(entries=entries, environment=_sandbox_environment(scope_policy))
 
     logger.info(
         "Creating sandbox session for scan %s (backend=%s, image=%s)",

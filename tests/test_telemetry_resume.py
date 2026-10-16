@@ -1,4 +1,7 @@
-"""Regression tests for telemetry emitted by resumed runs."""
+"""Regression tests for telemetry emitted by resumed runs.
+
+Usage volumes only travel to PostHog; Scarf receives coarse fields only.
+"""
 
 from __future__ import annotations
 
@@ -9,7 +12,7 @@ import pytest
 from agents.usage import Usage
 
 from strix.report.state import ReportState
-from strix.telemetry import posthog, scarf
+from strix.telemetry import posthog
 
 
 def _usage(requests: int, input_tokens: int, output_tokens: int, total_tokens: int) -> Usage:
@@ -26,7 +29,7 @@ def _capture(sent: list[dict[str, Any]], props: dict[str, Any]) -> bool:
     return True
 
 
-@pytest.mark.parametrize("telemetry", [posthog, scarf])
+@pytest.mark.parametrize("telemetry", [posthog])
 def test_scan_ended_reports_resumed_usage_delta(
     telemetry: Any,
     tmp_path: Any,
@@ -65,7 +68,7 @@ def test_scan_ended_reports_resumed_usage_delta(
     assert 0 <= sent[0]["duration_seconds"] <= 2
 
 
-@pytest.mark.parametrize("telemetry", [posthog, scarf])
+@pytest.mark.parametrize("telemetry", [posthog])
 def test_scan_ended_reports_all_fresh_run_usage(
     telemetry: Any,
     monkeypatch: pytest.MonkeyPatch,

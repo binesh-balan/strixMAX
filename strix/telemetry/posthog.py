@@ -13,6 +13,7 @@ from strix.telemetry._common import (
     get_scan_phase,
     get_version,
     is_first_run,
+    model_provider,
 )
 
 
@@ -44,6 +45,9 @@ def _send(event: str, properties: dict[str, Any]) -> bool:
                 "$lib": "strix-cli",
                 "$lib_version": get_version(),
                 "$process_person_profile": False,
+                # Tell PostHog not to record or geolocate the sender's IP.
+                "$ip": None,
+                "$geoip_disable": True,
             },
         }
         with requests.post(f"{_POSTHOG_HOST}/capture/", json=payload, timeout=SEND_TIMEOUT):
@@ -68,25 +72,13 @@ def start(
         "scan_started",
         {
             **base_props(),
-            "model": model or "unknown",
+            "model_provider": model_provider(model),
             "auth_mode": auth_mode or "api_key",
             "scan_mode": scan_mode or "unknown",
             "scan_type": "whitebox" if is_whitebox else "blackbox",
             "interactive": interactive,
             "has_instructions": has_instructions,
             "first_run": is_first_run(),
-        },
-    )
-
-
-def finding(severity: str, cwe: str | None = None, is_cve: bool = False) -> None:
-    _send(
-        "finding_reported",
-        {
-            **base_props(),
-            "severity": severity.lower(),
-            "cwe": (cwe or "").strip().lower() or "unknown",
-            "is_cve": is_cve,
         },
     )
 

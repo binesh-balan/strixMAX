@@ -1310,7 +1310,17 @@ def is_whitebox_scan(targets_info: list[dict[str, Any]]) -> bool:
     return any(t.get("type") == "local_code" for t in targets_info or [])
 
 
-def collect_local_sources(targets_info: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def collect_local_sources(
+    targets_info: list[dict[str, Any]], *, writable: bool = False
+) -> list[dict[str, Any]]:
+    """Host trees to mount into the sandbox.
+
+    A local source tree is the user's own checkout, so it is mounted read-only
+    unless ``writable`` is set (``--writable-source``): otherwise content the
+    agent reads in a target could get it to plant files (IDE tasks, git hooks,
+    build scripts) that later run on the user's machine. A cloned repository is
+    Strix's own scratch copy under the run directory and stays writable.
+    """
     local_sources: list[dict[str, Any]] = []
 
     for target_info in targets_info:
@@ -1323,7 +1333,7 @@ def collect_local_sources(targets_info: list[dict[str, Any]]) -> list[dict[str, 
                     "source_path": details["target_path"],
                     "workspace_subdir": workspace_subdir,
                     "protect_metadata": True,
-                    "read_only": bool(details.get("read_only")),
+                    "read_only": bool(details.get("read_only")) or not writable,
                 }
             )
 

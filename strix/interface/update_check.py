@@ -5,6 +5,13 @@ rate-limited (once per 24h) check against the release source, a cached
 result in ``~/.strix``, a non-intrusive notice with the upgrade command
 for the detected install method, and a ``strix --update`` self-update
 path for the standalone binary install.
+
+The background check is opt-in (``STRIX_UPDATE_CHECK=1``); it never runs
+when ``STRIX_NO_UPDATE_CHECK`` is set or a CI environment is detected.
+The release sources can be pointed at an internal mirror or fork with
+``STRIX_UPDATE_REPO`` (GitHub ``owner/name``) and
+``STRIX_UPDATE_PYPI_PACKAGE``. A binary self-update refuses to install a
+release asset that has no published sha256 digest.
 """
 
 from __future__ import annotations
@@ -14,6 +21,7 @@ import json
 import logging
 import os
 import platform
+import re
 import shutil
 import stat
 import subprocess
@@ -35,8 +43,8 @@ from strix.telemetry._common import get_version
 
 logger = logging.getLogger(__name__)
 
-GITHUB_REPO = "usestrix/strix"
-PYPI_PACKAGE = "strix-agent"
+DEFAULT_GITHUB_REPO = "usestrix/strix"
+DEFAULT_PYPI_PACKAGE = "strix-agent"
 CHECK_INTERVAL_SECONDS = 24 * 60 * 60
 REQUEST_TIMEOUT_SECONDS = 5
 
@@ -45,11 +53,29 @@ _CACHE_PATH = Path.home() / ".strix" / "update-check.json"
 _background_thread: threading.Thread | None = None
 
 
+_TRUTHY = {"1", "true", "yes", "on"}
+_REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+_PACKAGE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+
+
+def _github_repo() -> str:
+    value = os.environ.get("STRIX_UPDATE_REPO", "").strip()
+    return value if _REPO_RE.fullmatch(value) else DEFAULT_GITHUB_REPO
+
+
+def _pypi_package() -> str:
+    value = os.environ.get("STRIX_UPDATE_PYPI_PACKAGE", "").strip()
+    return value if _PACKAGE_RE.fullmatch(value) else DEFAULT_PYPI_PACKAGE
+
+
 def _is_disabled() -> bool:
-    return bool(os.environ.get("STRIX_NO_UPDATE_CHECK")) or any(
+    """The automatic check is off unless opted in; the hard-off switches always win."""
+    if bool(os.environ.get("STRIX_NO_UPDATE_CHECK")) or any(
         os.environ.get(key)
         for key in ("CI", "GITHUB_ACTIONS", "GITLAB_CI", "JENKINS_URL", "BUILDKITE", "CIRCLECI")
-    )
+    ):
+        return True
+    return os.environ.get("STRIX_UPDATE_CHECK", "").strip().lower() not in _TRUTHY
 
 
 def is_binary_install() -> bool:
@@ -69,11 +95,12 @@ def get_install_method() -> str:
 
 def get_upgrade_command(method: str | None = None) -> str:
     method = method or get_install_method()
+    package = _pypi_package()
     commands = {
         "binary": "strix --update",
-        "pipx": "pipx upgrade strix-agent",
-        "uv": "uv tool upgrade strix-agent",
-        "pip": "pip install --upgrade strix-agent",
+        "pipx": f"pipx upgrade {package}",
+        "uv": f"uv tool upgrade {package}",
+        "pip": f"pip install --upgrade {package}",
     }
     return commands[method]
 
@@ -98,14 +125,14 @@ def _fetch_latest_version() -> str | None:
     try:
         if is_binary_install():
             with requests.get(
-                f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest",
+                f"https://api.github.com/repos/{_github_repo()}/releases/latest",
                 timeout=REQUEST_TIMEOUT_SECONDS,
             ) as response:
                 response.raise_for_status()
                 tag = response.json().get("tag_name", "")
             return tag.lstrip("v") or None
         with requests.get(
-            f"https://pypi.org/pypi/{PYPI_PACKAGE}/json",
+            f"https://pypi.org/pypi/{_pypi_package()}/json",
             timeout=REQUEST_TIMEOUT_SECONDS,
         ) as response:
             response.raise_for_status()
@@ -120,7 +147,7 @@ def _fetch_asset_digest(version: str, filename: str) -> str | None:
     """Return the expected sha256 (hex) for a release asset, if the API provides one."""
     try:
         with requests.get(
-            f"https://api.github.com/repos/{GITHUB_REPO}/releases/tags/v{version}",
+            f"https://api.github.com/repos/{_github_repo()}/releases/tags/v{version}",
             timeout=REQUEST_TIMEOUT_SECONDS,
         ) as response:
             response.raise_for_status()
@@ -316,9 +343,16 @@ def _download_and_replace(version: str, target: str, console: Console) -> bool:
     is_windows = target.startswith("windows")
     archive_ext = ".zip" if is_windows else ".tar.gz"
     filename = f"strix-{version}-{target}{archive_ext}"
-    url = f"https://github.com/{GITHUB_REPO}/releases/download/v{version}/{filename}"
+    url = f"https://github.com/{_github_repo()}/releases/download/v{version}/{filename}"
     binary_name = f"strix-{version}-{target}" + (".exe" if is_windows else "")
     current_exe = Path(sys.executable).resolve()
+
+    # Fail closed: never install a binary whose integrity can't be checked.
+    expected_digest = _fetch_asset_digest(version, filename)
+    if not expected_digest:
+        raise RuntimeError(
+            f"no published sha256 checksum for {filename}; refusing to install an unverified binary"
+        )
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp)
@@ -334,16 +368,12 @@ def _download_and_replace(version: str, target: str, console: Console) -> bool:
                 for chunk in response.iter_content(chunk_size=1 << 20):
                     f.write(chunk)
 
-        expected_digest = _fetch_asset_digest(version, filename)
-        if expected_digest:
-            actual_digest = _sha256_file(archive_path)
-            if actual_digest != expected_digest:
-                raise RuntimeError(
-                    f"checksum mismatch for {filename}: "
-                    f"expected sha256 {expected_digest}, got {actual_digest}"
-                )
-        else:
-            console.print("[dim yellow]No published checksum available; skipping verification[/]")
+        actual_digest = _sha256_file(archive_path)
+        if actual_digest.lower() != expected_digest.lower():
+            raise RuntimeError(
+                f"checksum mismatch for {filename}: "
+                f"expected sha256 {expected_digest}, got {actual_digest}"
+            )
 
         if is_windows:
             with zipfile.ZipFile(archive_path) as zf:

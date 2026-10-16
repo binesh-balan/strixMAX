@@ -135,9 +135,11 @@ def render_system_prompt(
             include_scope=include_scope,
             **skill_content,
         )
-    except Exception:
-        logger.exception("render_system_prompt failed; returning empty prompt")
-        return ""
+    except Exception as exc:
+        # An empty prompt would run agents with no scope or rules at all, so a
+        # template failure stops the run instead.
+        logger.exception("render_system_prompt failed")
+        raise RuntimeError("Failed to render the agent system prompt") from exc
     else:
         logger.debug(
             "render_system_prompt: scan_mode=%s root=%s whitebox=%s skills=%d prompt_len=%d",

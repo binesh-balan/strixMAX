@@ -103,3 +103,14 @@ def test_scan_logging_alone_still_attaches_a_stderr_handler(tmp_path: Path) -> N
     assert len(_stderr_handlers(strix_logger)) == 1
     teardown()
     assert _stderr_handlers(strix_logger) == []
+
+
+@pytest.mark.usefixtures("clean_loggers")
+def test_scan_logging_creates_private_run_dir_and_log(tmp_path: Path) -> None:
+    run_dir = tmp_path / "strix_runs" / "new-run"
+    teardown = strix_logging.setup_scan_logging(run_dir)
+    try:
+        assert run_dir.stat().st_mode & 0o777 == 0o700
+        assert (run_dir / "strix.log").stat().st_mode & 0o777 == 0o600
+    finally:
+        teardown()

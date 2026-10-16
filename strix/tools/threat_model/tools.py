@@ -75,13 +75,22 @@ def _git(repo: Path, args: list[str]) -> str | None:
     return result.stdout.strip() or None
 
 
+#: Checkouts a scan works on live under the sandbox workspace. This tool runs
+#: on the host, so a path outside it is never resolved or probed with git: an
+#: agent must not be able to learn which host directories exist or read the
+#: remotes of the user's other repositories by naming them as a "target".
+_WORKSPACE_ROOT = Path("/workspace")
+
+
 def _local_directory(target: str) -> Path | None:
-    """Return the target as a local directory, or None if it is not one."""
-    if "://" in target:
+    """Return the target as a workspace directory, or None if it is not one."""
+    if "://" in target or "~" in target:
         return None
     try:
-        resolved = Path(target).expanduser().resolve()
+        resolved = Path(target).resolve()
     except OSError:
+        return None
+    if resolved != _WORKSPACE_ROOT and _WORKSPACE_ROOT not in resolved.parents:
         return None
     return resolved if resolved.is_dir() else None
 

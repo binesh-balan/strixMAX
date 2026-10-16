@@ -74,10 +74,18 @@ Strix reads this file at the start of each run. There is no default file, so no 
 </ParamField>
 
 <ParamField path="allowed_tools" type="array">
-  Restrict which tools the agent can call. Omit it to expose every tool the
-  server offers, or set it to a list of tool names to allow only those. Strix
-  does not decide for you which of a server's tools only read and which change
-  things, so run the server in its own read-only mode if it has one.
+  Restrict which tools the agent can see. Omit it to list every tool the
+  server offers, or set it to a list of tool names to allow only those. A tool
+  named here can be called even if the server does not mark it read-only.
+</ParamField>
+
+<ParamField path="allow_write_tools" type="boolean" default="false">
+  By default the agent can only call tools the server annotates as read-only
+  (`readOnlyHint`), plus tools you name in `allowed_tools`. The agent reads
+  attacker-controlled content from targets, so this keeps injected text from
+  driving writes or deletes on the systems you connect. Set it to `true` to
+  allow every tool. `stdio` servers run on your machine with your user's
+  privileges, so connect only servers you trust.
 </ParamField>
 
 <ParamField path="notes" type="string">

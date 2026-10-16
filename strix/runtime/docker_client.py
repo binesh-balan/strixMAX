@@ -13,8 +13,13 @@ deltas:
    dead port.
 2. Append NET_ADMIN/NET_RAW to ``cap_add`` (required by ``nmap -sS`` and
    other raw-socket tools).
-3. Add ``host.docker.internal`` → host-gateway to ``extra_hosts`` so the
-   agent can reach host-served apps.
+3. Add ``host.docker.internal`` → host-gateway to ``extra_hosts``, but only
+   when a scan target lives on the host (``STRIX_ALLOW_HOST_GATEWAY=1`` in the
+   manifest environment). Otherwise the agent gets no route to the host.
+4. Set ``no-new-privileges`` and default cgroup limits. The image has no
+   sudo; ``NET_ADMIN`` is used once, by root at start, to install the egress
+   firewall (``containers/strix-init.sh``), and the unprivileged agent user
+   cannot use it afterwards.
 
 Pinned to ``openai-agents==0.14.6``. Bumping the SDK requires
 re-merging the parent body. Track upstream for an injection hook.
@@ -22,6 +27,7 @@ re-merging the parent body. Track upstream for an injection hook.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 import os
@@ -66,10 +72,24 @@ def _apply_sandbox_network(create_kwargs: dict[str, Any]) -> None:
         create_kwargs.pop("ports", None)
 
 
+#: Defaults for the cgroup caps below. An autonomous agent running arbitrary
+#: commands should not be able to take the whole host down with a fork bomb or
+#: a runaway scan. Set a variable to ``0``/``off`` to opt back out to docker's
+#: unbounded default.
+_DEFAULT_MEM_LIMIT = "8g"
+_DEFAULT_PIDS_LIMIT = "4096"
+_OFF_VALUES = ("0", "off", "none", "unlimited")
+
+
+def _limit_env(name: str, default: str = "") -> str:
+    value = os.environ.get(name, default).strip()
+    return "" if value.lower() in _OFF_VALUES else value
+
+
 def _apply_resource_limits(create_kwargs: dict[str, Any]) -> None:
-    """Apply optional cgroup resource caps from the environment. Unset/blank
-    values leave docker's default (unbounded), so this is opt-in per host."""
-    mem_limit = os.environ.get("STRIX_SANDBOX_MEM_LIMIT", "").strip()
+    """Apply cgroup resource caps. Memory and pids are capped by default; CPU
+    and shm stay opt-in."""
+    mem_limit = _limit_env("STRIX_SANDBOX_MEM_LIMIT", _DEFAULT_MEM_LIMIT)
     if mem_limit:
         create_kwargs["mem_limit"] = mem_limit
 
@@ -84,7 +104,7 @@ def _apply_resource_limits(create_kwargs: dict[str, Any]) -> None:
             if 0 < nano_cpus <= 2**63 - 1:
                 create_kwargs["nano_cpus"] = nano_cpus
 
-    pids_limit = os.environ.get("STRIX_SANDBOX_PIDS_LIMIT", "").strip()
+    pids_limit = _limit_env("STRIX_SANDBOX_PIDS_LIMIT", _DEFAULT_PIDS_LIMIT)
     if pids_limit:
         with contextlib.suppress(ValueError):
             create_kwargs["pids_limit"] = int(pids_limit)
@@ -110,6 +130,31 @@ def _apply_log_limits(create_kwargs: dict[str, Any]) -> None:
     )
 
 
+def _apply_strix_security(
+    create_kwargs: dict[str, Any], environment: dict[str, str] | None
+) -> list[str]:
+    """Capabilities, host route and privilege flags. Appends rather than
+    overwrites so the SDK's FUSE/SYS_ADMIN settings survive."""
+    cap_add: list[str] = list(create_kwargs.get("cap_add") or [])
+    create_kwargs["cap_add"] = cap_add
+    for cap in ("NET_ADMIN", "NET_RAW"):
+        if cap not in cap_add:
+            cap_add.append(cap)
+
+    if (environment or {}).get("STRIX_ALLOW_HOST_GATEWAY") == "1":
+        extra_hosts = create_kwargs.setdefault("extra_hosts", {})
+        extra_hosts["host.docker.internal"] = "host-gateway"
+
+    # Blocks setuid/file-capability privilege gains for everything in the
+    # container. ``nmap`` then falls back to connect scans; set
+    # STRIX_SANDBOX_NO_NEW_PRIVILEGES=0 if SYN scans matter more than this.
+    if os.environ.get("STRIX_SANDBOX_NO_NEW_PRIVILEGES", "1").strip().lower() not in _OFF_VALUES:
+        security_opt = create_kwargs.setdefault("security_opt", [])
+        if "no-new-privileges:true" not in security_opt:
+            security_opt.append("no-new-privileges:true")
+    return cap_add
+
+
 def _apply_run_labels(create_kwargs: dict[str, Any]) -> None:
     run_id = os.getenv("STRIX_RUN_ID")
     if not run_id:
@@ -123,10 +168,42 @@ def _apply_run_labels(create_kwargs: dict[str, Any]) -> None:
         labels["strix-run-type"] = run_type
 
 
+_INIT_COMMAND = ["/usr/local/sbin/strix-init"]
+_INIT_TIMEOUT_SECONDS = 120
+
+
+class SandboxInitError(RuntimeError):
+    """``strix-init`` failed, so the sandbox has no firewall or proxy."""
+
+
+def run_sandbox_init(container: Container) -> None:
+    """Run the image's root setup step through the Docker API.
+
+    The image has no sudo, so this exec is the only way anything runs as root
+    in the sandbox; the agent's own commands run as ``pentester``. A failure
+    raises rather than letting a scan proceed without its egress firewall.
+    """
+    result = container.exec_run(_INIT_COMMAND, user="0", demux=False)
+    raw_output: bytes = result.output if isinstance(result.output, bytes) else b""
+    output = raw_output.decode("utf-8", errors="replace").strip()
+    if result.exit_code != 0:
+        raise SandboxInitError(f"sandbox init failed (exit {result.exit_code}): {output[-2000:]}")
+    logger.info("Sandbox init complete: %s", output.splitlines()[-1] if output else "")
+
+
 class StrixDockerSandboxSession(DockerSandboxSession):
     sandbox_network: str = ""
 
+    async def _ensure_backend_started(self) -> None:
+        # A restarted container lost its netfilter rules and Caido process.
+        self._container.reload()
+        if not await self.running():
+            self._container.start()
+            await asyncio.to_thread(run_sandbox_init, self._container)
+
     async def _resolve_exposed_port(self, port: int) -> ExposedPortEndpoint:
+        if not self.sandbox_network:
+            return await super()._resolve_exposed_port(port)
         try:
             self._container.reload()
         except docker_errors.APIError as e:
@@ -220,17 +297,7 @@ class StrixDockerSandboxClient(DockerSandboxClient):
             }
         # ----- END VERBATIM COPY -----
 
-        # Strix injections — append, don't overwrite, so FUSE/SYS_ADMIN survives.
-        cap_add = create_kwargs.setdefault("cap_add", [])
-        if not isinstance(cap_add, list):
-            cap_add = list(cap_add)
-            create_kwargs["cap_add"] = cap_add
-        for cap in ("NET_ADMIN", "NET_RAW"):
-            if cap not in cap_add:
-                cap_add.append(cap)
-
-        extra_hosts = create_kwargs.setdefault("extra_hosts", {})
-        extra_hosts["host.docker.internal"] = "host-gateway"
+        cap_add = _apply_strix_security(create_kwargs, environment)
 
         _apply_sandbox_network(create_kwargs)
         _apply_resource_limits(create_kwargs)
@@ -270,9 +337,10 @@ class StrixDockerSandboxClient(DockerSandboxClient):
         session = await super().create(**kwargs)
         network = _sandbox_network()
         inner = session._inner
-        if network and isinstance(inner, DockerSandboxSession):
+        if isinstance(inner, DockerSandboxSession):
             inner.__class__ = StrixDockerSandboxSession
-            cast("StrixDockerSandboxSession", inner).sandbox_network = network
+            cast("StrixDockerSandboxSession", inner).sandbox_network = network or ""
+            await asyncio.to_thread(run_sandbox_init, inner._container)  # pyright: ignore[reportPrivateUsage]
         return session
 
     async def delete(self, session: SandboxSession) -> SandboxSession:

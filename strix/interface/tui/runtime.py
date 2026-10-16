@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, TextIO
 
 from strix.config import load_settings, persist_current
+from strix.config.settings import DEFAULT_SANDBOX_IMAGE
 from strix.core.agents import AgentCoordinator
 from strix.core.hooks import BudgetExceededError
 from strix.core.runner import run_strix_scan
@@ -213,7 +214,7 @@ class GoTuiRuntime:
             self.scan_task = asyncio.create_task(self._run_scan())
 
     async def _run_scan(self) -> None:
-        image = str(load_settings().runtime.image or "strix-sandbox:latest")
+        image = str(load_settings().runtime.image or DEFAULT_SANDBOX_IMAGE)
         try:
             await run_strix_scan(
                 scan_config=self.scan_config,

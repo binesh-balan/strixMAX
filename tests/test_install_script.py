@@ -52,6 +52,7 @@ esac
         mock_bin / "curl",
         """#!/bin/sh
 output=""
+url=""
 while [ "$#" -gt 0 ]; do
   if [ "$1" = "-o" ]; then
     output="$2"
@@ -59,9 +60,19 @@ while [ "$#" -gt 0 ]; do
     continue
   fi
   printf '%s\\n' "$1" >> "$STRIX_TEST_CURL_LOG"
+  url="$1"
   shift
 done
-cp "$STRIX_TEST_ARCHIVE" "$output"
+case "$url" in
+  */SHA256SUMS)
+    # The release's checksum file, listing the archive under its own name.
+    name=$(basename "$STRIX_TEST_ARCHIVE")
+    sum=$(sha256sum "$STRIX_TEST_ARCHIVE" | cut -d' ' -f1)
+    [ -n "${STRIX_TEST_BAD_SUM:-}" ] && sum=$(printf '0%.0s' $(seq 64))
+    printf '%s  %s\\n' "$sum" "$name" > "$output"
+    ;;
+  *) cp "$STRIX_TEST_ARCHIVE" "$output" ;;
+esac
 """,
     )
     return mock_bin
@@ -134,6 +145,23 @@ def test_installer_downloads_and_runs_linux_arm64_release(tmp_path: Path) -> Non
         check=True,
     )
     assert installed_result.stdout.strip() == f"strix {RELEASE_VERSION}"
+
+
+def test_installer_refuses_a_checksum_mismatch(tmp_path: Path) -> None:
+    repository_root = Path(__file__).resolve().parents[1]
+    archive_path = _create_release_archive(tmp_path)
+    mock_bin = _create_mock_commands(tmp_path, machine="aarch64")
+    environment, home_path, _ = _create_installer_environment(
+        tmp_path,
+        archive_path,
+        mock_bin,
+    )
+    environment["STRIX_TEST_BAD_SUM"] = "1"
+
+    result = _run_installer(repository_root, environment)
+
+    assert result.returncode != 0
+    assert not (home_path / ".strix/bin/strix").exists()
 
 
 def test_installer_rejects_unsupported_architecture(tmp_path: Path) -> None:

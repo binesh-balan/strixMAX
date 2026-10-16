@@ -408,7 +408,7 @@ def _bootstrap_scan(args: argparse.Namespace) -> None:
         report_error("model_connection_failed", exc)
         _print_model_connection_error(exc)
         sys.exit(1)
-    persist_current()
+    persist_current(interactive=not args.non_interactive)
     try:
         prepare_run(args)
     except ValueError as e:

@@ -99,6 +99,14 @@ else
     echo -e "${GREEN}Created:${NC} $RELEASE_DIR/$ARCHIVE_NAME"
 fi
 
+echo -e "\n${BLUE}Writing checksum...${NC}"
+if command -v sha256sum &> /dev/null; then
+    (cd "$RELEASE_DIR" && sha256sum "$ARCHIVE_NAME" > "$ARCHIVE_NAME.sha256")
+else
+    (cd "$RELEASE_DIR" && shasum -a 256 "$ARCHIVE_NAME" > "$ARCHIVE_NAME.sha256")
+fi
+echo -e "${GREEN}Created:${NC} $RELEASE_DIR/$ARCHIVE_NAME.sha256"
+
 echo -e "\n${GREEN}Build successful!${NC}"
 echo "================================"
 echo -e "${YELLOW}Binary:${NC} $RELEASE_DIR/$BINARY_NAME"

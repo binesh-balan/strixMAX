@@ -147,25 +147,39 @@ class ContextSettings(BaseSettings):
     )
 
 
+# Public default sandbox image (a mutable tag). Enterprises should set
+# STRIX_IMAGE to an internally mirrored, verified `@sha256:` digest reference
+# (e.g. `registry.example.com/strix-sandbox@sha256:...`) so the sandbox cannot
+# change underneath them. Keep scripts/install.sh in sync with this value.
+DEFAULT_SANDBOX_IMAGE = "ghcr.io/usestrix/strix-sandbox:1.3.0"
+
+
 class RuntimeSettings(BaseSettings):
     model_config = _BASE_CONFIG
 
     image: str = Field(
-        default="ghcr.io/usestrix/strix-sandbox:1.3.0",
+        default=DEFAULT_SANDBOX_IMAGE,
         alias="STRIX_IMAGE",
     )
     backend: str = Field(default="docker", alias="STRIX_RUNTIME_BACKEND")
     # Max screenshot/image tool outputs kept live per agent context (0 = none).
     max_context_images: int = Field(default=3, ge=0, alias="STRIX_MAX_CONTEXT_IMAGES")
+    # Agents can spawn children on their own, including when steered by target
+    # content; this caps how many a single scan can have, so a runaway or
+    # injected spawn loop cannot multiply LLM cost and traffic to the target.
+    max_agents: int = Field(default=50, ge=1, alias="STRIX_MAX_AGENTS")
 
 
 class TelemetrySettings(BaseSettings):
     model_config = _BASE_CONFIG
 
-    enabled: bool = Field(default=True, alias="STRIX_TELEMETRY")
+    # Off unless the user opts in with STRIX_TELEMETRY=1.
+    enabled: bool = Field(default=False, alias="STRIX_TELEMETRY")
 
 
-WebSearchProvider = Literal["auto", "perplexity", "exa"]
+# ``off`` disables web_search/web_get_contents, e.g. for engagements whose data
+# must not reach a third-party search provider.
+WebSearchProvider = Literal["auto", "perplexity", "exa", "off"]
 ExaSearchType = Literal["auto", "fast", "instant", "deep-lite", "deep", "deep-reasoning"]
 
 

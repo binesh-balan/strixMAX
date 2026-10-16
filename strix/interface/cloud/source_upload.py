@@ -5,6 +5,7 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import os
+import re
 import shutil
 import stat
 import subprocess  # nosec B404
@@ -86,7 +87,27 @@ _SENSITIVE_PATTERNS = (
     "secrets.*",
     "secret.*",
     ".env.*",
+    # Terraform variable files and state routinely hold provider credentials
+    # and every secret the managed resources were created with.
+    "*.tfvars",
+    "*.tfvars.json",
+    "*.tfstate",
+    "*.tfstate.backup",
 )
+# Directories whose every file is treated as secret-like.
+_SENSITIVE_DIRS = frozenset({"terraform.tfstate.d"})
+# High-confidence credential formats. A selected file containing one is left
+# out of the archive and reported, so a key committed to source is never
+# uploaded by accident; --include-sensitive keeps such files.
+_SECRET_CONTENT_PATTERNS = (
+    re.compile(rb"(?<![A-Z0-9])AKIA[0-9A-Z]{16}(?![A-Z0-9])"),
+    re.compile(rb"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----"),
+    re.compile(rb"(?<![A-Za-z0-9_])gh[pousr]_[A-Za-z0-9]{36}(?![A-Za-z0-9])"),
+    re.compile(rb"(?<![A-Za-z0-9])xox[baprs]-[A-Za-z0-9-]{10,}"),
+)
+_SECRET_SCAN_CHUNK = 1024 * 1024
+# Longer than any pattern above, so a match split across two reads is found.
+_SECRET_SCAN_OVERLAP = 128
 _SENSITIVE_PATH_SUFFIXES = (
     (".aws", "credentials"),
     (".aws", "config"),
@@ -146,6 +167,7 @@ class SourceManifest:
     include_hidden: bool
     include_sensitive: bool
     include_archives: bool
+    secret_content_files: tuple[str, ...] = ()
 
     @property
     def total_bytes(self) -> int:
@@ -168,6 +190,10 @@ class SourceManifest:
             "include_sensitive": self.include_sensitive,
             "include_archives": self.include_archives,
         }
+        if self.secret_content_files:
+            # Always listed (not only with --show-files) so the user sees which
+            # files were held back for looking like they contain credentials.
+            result["skipped_secret_files"] = list(self.secret_content_files)
         if archive_bytes is not None:
             result["archive_bytes"] = archive_bytes
         if archive_sha256 is not None:
@@ -273,6 +299,7 @@ def select_source(
 ) -> SourceManifest:
     excluded: Counter[str] = Counter()
     selected: list[SelectedFile] = []
+    secret_content_files: list[str] = []
     patterns = [*_load_ignore_patterns(source), *(exclude or [])]
     _validate_patterns(patterns)
     total_bytes = 0
@@ -309,6 +336,10 @@ def select_source(
             raise http.CloudError(
                 f"{archive_name} is larger than the 25 MB per-file limit; exclude it explicitly."
             )
+        if not include_sensitive and _contains_secret(path):
+            excluded["secret_content"] += 1
+            secret_content_files.append(archive_name)
+            continue
         selected.append(
             SelectedFile(
                 path=path,
@@ -338,7 +369,26 @@ def select_source(
         include_hidden,
         include_sensitive,
         include_archives,
+        tuple(sorted(secret_content_files)),
     )
+
+
+def _contains_secret(path: Path) -> bool:
+    """Whether a file contains a high-confidence credential pattern."""
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+        with os.fdopen(descriptor, "rb") as stream:
+            tail = b""
+            while chunk := stream.read(_SECRET_SCAN_CHUNK):
+                window = tail + chunk
+                if any(pattern.search(window) for pattern in _SECRET_CONTENT_PATTERNS):
+                    return True
+                tail = window[-_SECRET_SCAN_OVERLAP:]
+    except OSError:
+        # Unreadable here means the archive step fails loudly on it later.
+        return False
+    return False
 
 
 def remove_bundle(bundle: SourceBundle) -> None:
@@ -551,6 +601,7 @@ def _exclusion_reason(  # noqa: PLR0911
     name = relative.name.lower()
     if not include_sensitive and (
         name in _SENSITIVE_NAMES
+        or any(part in _SENSITIVE_DIRS for part in lower_parts[:-1])
         or any(fnmatch.fnmatch(name, pattern) for pattern in _SENSITIVE_PATTERNS)
         or any(
             lower_parts[-len(suffix) :] == suffix

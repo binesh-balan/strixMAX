@@ -123,7 +123,12 @@ def test_resume_restores_a_target_less_workspace_mount(
     assert args.targets_info == []
     assert args.workspace_mount == str(work)
     assert args.local_sources == [
-        {"source_path": str(work), "workspace_subdir": "project", "protect_metadata": True}
+        {
+            "source_path": str(work),
+            "workspace_subdir": "project",
+            "protect_metadata": True,
+            "read_only": True,
+        }
     ]
     assert args.instruction == "audit the auth flow"
 
