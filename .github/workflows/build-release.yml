@@ -52,6 +52,21 @@ jobs:
           check-latest: true
           cache: false
 
+      # cryptography 49+ ships no Intel macOS wheel, so `uv sync --frozen`
+      # builds it from the locked (hash-checked) sdist here. That needs Rust,
+      # which the runner image provides, and OpenSSL headers from Homebrew.
+      # Linking OpenSSL statically keeps the PyInstaller bundle self-contained.
+      - name: Prepare cryptography source build (Intel macOS)
+        if: matrix.target == 'macos-x86_64'
+        shell: bash
+        run: |
+          brew list openssl@3 >/dev/null 2>&1 || brew install openssl@3
+          rustc --version
+          {
+            echo "OPENSSL_DIR=$(brew --prefix openssl@3)"
+            echo "OPENSSL_STATIC=1"
+          } >> "$GITHUB_ENV"
+
       - name: Build
         shell: bash
         env:
