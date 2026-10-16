@@ -72,8 +72,8 @@ Use Semgrep as the default static triage pass:
 semgrep scan --config p/default --config p/golang --config p/secrets \
   --metrics=off --json --output /workspace/.source-aware/semgrep.json .
 
-# If you choose auto config, do not combine it with --metrics=off
-semgrep scan --config auto --json --output /workspace/.source-aware/semgrep-auto.json .
+# Never use --config auto: it requires Semgrep metrics, which report repository
+# details to semgrep.dev. Always keep --metrics=off.
 ```
 
 If diff scope is active, restrict to changed files first, then expand only when needed.
@@ -144,7 +144,8 @@ Detect hardcoded credentials:
 
 ```bash
 gitleaks detect --source . --report-format json --report-path /workspace/.source-aware/gitleaks.json
-trufflehog filesystem --json . > /workspace/.source-aware/trufflehog.json
+# --no-verification: never log in to providers with the client's secrets
+trufflehog filesystem --no-update --json --no-verification . > /workspace/.source-aware/trufflehog.json
 ```
 
 Run repository-wide dependency and config checks:

