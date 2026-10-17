@@ -39,7 +39,7 @@ SQLi remains one of the most durable and impactful vulnerability classes. Modern
 - Use subselect gating to avoid global latency noise
 
 **Out-of-Band (OAST)**
-- DNS/HTTP callbacks via DB-specific primitives
+- DNS/HTTP callbacks via DB-specific primitives, only to the operator's private server (`$STRIX_OAST_SERVER`); never interactsh's public `oast.*` defaults, and never put extracted data in the callback
 
 ## DBMS Primitives
 

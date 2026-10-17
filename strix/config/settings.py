@@ -215,6 +215,11 @@ class IntegrationSettings(BaseSettings):
         alias="POSTMAN_API_KEY",
         repr=False,
     )
+    # Private interactsh server for out-of-band (OAST) testing. When unset the
+    # agent is told not to use OAST at all, because interactsh's public default
+    # servers would receive callbacks from the client's systems.
+    oast_server: str | None = Field(default=None, alias="STRIX_OAST_SERVER")
+    oast_token: str | None = Field(default=None, alias="STRIX_OAST_TOKEN", repr=False)
 
 
 class ViewerSettings(BaseSettings):
@@ -224,6 +229,11 @@ class ViewerSettings(BaseSettings):
     # verification and encrypted report delivery. The browser never talks to
     # the relay directly; the local server is the only caller.
     app_url: str = Field(default="https://app.strix.ai", alias="STRIX_APP_URL")
+    # The relay is off unless the operator opts in: verification sends an email
+    # address, feedback sends free text, and report delivery sends the run and
+    # target names to app_url. With it off those viewer actions report
+    # "unavailable" and nothing leaves the machine.
+    relay_enabled: bool = Field(default=False, alias="STRIX_VIEWER_RELAY")
 
 
 class Settings(BaseSettings):

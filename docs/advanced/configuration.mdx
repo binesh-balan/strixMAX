@@ -121,6 +121,18 @@ affecting the agents that do the actual testing.
   API key for Exa. Enables real-time web search through the Exa `/search` endpoint. Exa also powers the `web_get_contents` tool, which fetches the full text of a page through the Exa `/contents` endpoint. This is the preferred web search provider.
 </ParamField>
 
+<ParamField path="STRIX_OAST_SERVER" type="string">
+  URL of a private [interactsh](https://github.com/projectdiscovery/interactsh) server for out-of-band (OAST) testing, passed into the sandbox. When it is unset, agents are told not to use OAST, and nuclei runs with `-ni`. Interactsh's public default servers are never used, because they would receive callbacks from the client's systems.
+</ParamField>
+
+<ParamField path="STRIX_OAST_TOKEN" type="string">
+  Auth token for `STRIX_OAST_SERVER`, if the server requires one.
+</ParamField>
+
+<ParamField path="STRIX_VIEWER_RELAY" default="false" type="boolean">
+  Lets the results viewer call the Strix relay at `STRIX_APP_URL` for email verification, feedback, and emailing reports. Off by default, so those viewer actions report "unavailable" and nothing leaves the machine. Past-run history is available without verification either way.
+</ParamField>
+
 <ParamField path="STRIX_WEB_SEARCH_PROVIDER" default="auto" type="string">
   Web search provider: `auto`, `perplexity`, or `exa`. With `auto`, Strix uses Exa when `EXA_API_KEY` is set, and Perplexity otherwise. Set an explicit provider to pin one when you configure both keys.
 </ParamField>

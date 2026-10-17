@@ -8,11 +8,13 @@ import inspect
 import io
 import logging
 import os
+import socket
 import sys
 import tarfile
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit
 
 from agents.sandbox.entries import BaseEntry, LocalDir
 from agents.sandbox.manifest import Environment, Manifest
@@ -53,6 +55,25 @@ _EXTRA_FILE_ARCHIVE_REL = ".strix-extra-files.tar"
 _EXTRA_FILE_ARCHIVE = f"{_WORKSPACE_ROOT}/{_EXTRA_FILE_ARCHIVE_REL}"
 _EXTRA_FILE_EXTRACT_TIMEOUT_S = 120
 _EXTRA_FILE_MODE = 0o644
+
+
+def _resolve_host(host: str) -> list[str]:
+    try:
+        infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
+    except (OSError, UnicodeError):
+        return []
+    return sorted({str(info[4][0]) for info in infos})
+
+
+def _oast_env() -> dict[str, str]:
+    """Expose the operator's private interactsh server, if any, to the sandbox."""
+    integrations = load_settings().integrations
+    env: dict[str, str] = {}
+    if integrations.oast_server:
+        env["STRIX_OAST_SERVER"] = integrations.oast_server
+        if integrations.oast_token:
+            env["STRIX_OAST_TOKEN"] = integrations.oast_token
+    return env
 
 
 def _host_identity_env() -> dict[str, str]:
@@ -290,11 +311,21 @@ def _sandbox_environment(scope_policy: ScopePolicy | None) -> Environment:
         egress_env["STRIX_CAIDO_ALLOWED_SOURCES"] = os.environ.get(
             "STRIX_CAIDO_ALLOWED_SOURCES", ""
         ).strip()
+    oast_env = _oast_env()
+    if oast_env:
+        # The operator's private OAST server must stay reachable when the
+        # firewall restricts egress to the targets.
+        server = oast_env["STRIX_OAST_SERVER"]
+        host = urlsplit(server if "://" in server else f"//{server}").hostname or server
+        allow = [a for a in egress_env.get("STRIX_EGRESS_ALLOW", "").split(",") if a]
+        allow.extend(_resolve_host(host))
+        egress_env["STRIX_EGRESS_ALLOW"] = ",".join(dict.fromkeys(allow))
     return Environment(
         value={
             "PYTHONUNBUFFERED": "1",
             **_host_identity_env(),
             **egress_env,
+            **oast_env,
             "http_proxy": container_caido_url,
             "https_proxy": container_caido_url,
             "ALL_PROXY": container_caido_url,

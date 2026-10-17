@@ -70,6 +70,7 @@ Improper file path handling and dynamic inclusion enable sensitive file disclosu
 
 ### OAST
 
+- Callbacks go only to the operator's private server (`$STRIX_OAST_SERVER`), never interactsh's public `oast.*` defaults; skip OAST when it is unset.
 - For RFI or URL-capable resource loaders, a correlated callback confirms server-side resolution/fetch. It does not by itself prove inclusion or execution; use a separate response or side-effect oracle for that claim.
 
 ### Side Effects
