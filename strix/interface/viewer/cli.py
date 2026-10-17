@@ -16,7 +16,12 @@ from strix.core.paths import (
     run_record_path,
     runs_base_dir,
 )
-from strix.interface.viewer.server import authorized_url, bundle_is_built, serve
+from strix.interface.viewer.server import (
+    authorized_url,
+    bundle_is_built,
+    is_loopback_host,
+    serve,
+)
 from strix.interface.viewer.transcript import read_run_summary
 
 
@@ -48,7 +53,19 @@ def run_view(argv: list[str]) -> None:
     parser.add_argument(
         "--host",
         default="127.0.0.1",
-        help="Host to bind to (default: 127.0.0.1; use 0.0.0.0 for all IPv4 interfaces).",
+        help=(
+            "Host to bind to (default: 127.0.0.1). The viewer serves plain HTTP, so a "
+            "non-loopback host such as 0.0.0.0 (all IPv4 interfaces) also needs "
+            "--insecure-bind."
+        ),
+    )
+    parser.add_argument(
+        "--insecure-bind",
+        action="store_true",
+        help=(
+            "Allow binding a non-loopback --host. Traffic, including the session "
+            "cookie and run data, is unencrypted on the network."
+        ),
     )
     parser.add_argument(
         "--no-open",
@@ -58,6 +75,21 @@ def run_view(argv: list[str]) -> None:
     args = parser.parse_args(argv)
 
     console = Console()
+
+    if not is_loopback_host(args.host):
+        if not args.insecure_bind:
+            console.print(
+                f"[bold red]Refusing to bind the viewer to non-loopback host {args.host!r}.[/]\n"
+                "The viewer serves plain HTTP: the session cookie, findings, and steering "
+                "traffic would cross the network unencrypted.\n"
+                "Prefer an SSH tunnel ([cyan]ssh -L 8000:127.0.0.1:8000 host[/] with "
+                "[cyan]--port 8000[/]), or pass [cyan]--insecure-bind[/] to accept the risk."
+            )
+            raise SystemExit(2)
+        console.print(
+            f"[bold yellow]WARNING:[/] serving the viewer over plain HTTP on {args.host!r}. "
+            "Anyone on the network path can read run data and capture the session."
+        )
 
     if not bundle_is_built():
         console.print(
@@ -93,8 +125,8 @@ def run_view(argv: list[str]) -> None:
     # Print the URL alone on its own line with soft_wrap so Rich never inserts a
     # wrap into the (long, tokened) link -- that keeps it selectable/copyable.
     console.print(f"  [#60a5fa]{open_url}[/]", soft_wrap=True)
-    console.print("[dim]This link authorizes the browser; anyone you share it with can steer[/]")
-    console.print("[dim]a live scan and browse history. Press Ctrl-C to stop the viewer.[/]")
+    console.print("[dim]This link works once: the first browser to open it can steer a live[/]")
+    console.print("[dim]scan and browse history. Press Ctrl-C to stop the viewer.[/]")
     console.print()
 
     try:

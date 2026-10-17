@@ -44,6 +44,7 @@ from strix.core.inputs import (
     make_model_settings,
 )
 from strix.core.paths import run_dir_for, runtime_state_dir
+from strix.core.scope import build_scope_policy
 from strix.core.sessions import open_agent_session
 from strix.report.state import get_global_report_state
 from strix.runtime import session_manager
@@ -356,6 +357,7 @@ async def run_strix_scan(
     else:
         root_id = uuid.uuid4().hex[:8]
 
+    scope_policy = build_scope_policy(build_scope_context(scan_config))
     logger.info("Bringing up sandbox session for scan %s", scan_id)
     set_scan_phase("sandbox_init")
     bundle = await session_manager.create_or_reuse(
@@ -364,6 +366,7 @@ async def run_strix_scan(
         local_sources=local_sources or [],
         extra_files=extra_files,
         status_sink=status_sink,
+        scope_policy=scope_policy,
     )
     report("Waiting for the first model response")
     logger.info("Sandbox ready for scan %s", scan_id)
@@ -556,6 +559,7 @@ async def run_strix_scan(
             "interactive": interactive,
             "spawn_child_agent": spawn_child_agent,
             "scan_targets": build_scan_targets(scan_config),
+            "scope_policy": scope_policy,
             "max_context_images": settings.runtime.max_context_images,
             "supports_images": supports_images,
         }

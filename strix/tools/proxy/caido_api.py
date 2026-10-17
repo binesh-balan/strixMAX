@@ -291,6 +291,49 @@ def full_url_from_components(
     return f"{scheme}://{host_header}{components['url_path']}"
 
 
+#: Headers that carry the original target's credentials. They are dropped when
+#: a replay is pointed at a different host, so a captured session token can't
+#: be sent somewhere else (e.g. a host named in prompt-injected content).
+CREDENTIAL_HEADERS = frozenset(
+    {
+        "authorization",
+        "cookie",
+        "proxy-authorization",
+        "x-api-key",
+        "x-auth-token",
+        "x-csrf-token",
+        "x-xsrf-token",
+        "x-amz-security-token",
+    }
+)
+
+
+def strip_credentials_on_host_change(
+    original_url: str, final_url: str, headers: dict[str, str], explicit: dict[str, Any]
+) -> tuple[dict[str, str], list[str]]:
+    """Drop inherited credential headers when the replay leaves the original host.
+
+    Headers the caller set explicitly in this replay are kept: those are a
+    deliberate choice, not something silently carried over.
+    """
+    original_host = (urlparse(original_url).hostname or "").lower()
+    final_host = (urlparse(final_url).hostname or "").lower()
+    if not original_host or original_host == final_host:
+        return headers, []
+    explicit_keys = {key.lower() for key in explicit}
+    kept: dict[str, str] = {}
+    dropped: list[str] = []
+    for key, value in headers.items():
+        lowered = key.lower()
+        if lowered in CREDENTIAL_HEADERS and lowered not in explicit_keys:
+            dropped.append(key)
+            continue
+        if lowered == "host":
+            continue
+        kept[key] = value
+    return kept, dropped
+
+
 def apply_modifications(
     components: dict[str, Any],
     modifications: dict[str, Any],

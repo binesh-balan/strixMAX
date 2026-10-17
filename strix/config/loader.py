@@ -33,6 +33,29 @@ _cached: Settings | None = None
 # and are dropped rather than mixed with the new value.
 _LINKED_LLM_FIELDS = ("model", "api_key", "api_base")
 
+# Env vars whose values are credentials. They are only written to the config
+# file from the environment when the user opts in with STRIX_PERSIST_SECRETS=1,
+# so a key exported for one shell does not silently end up on disk.
+_SECRET_SUFFIXES = (
+    "_API_KEY",
+    "_TOKEN",
+    "_SECRET",
+    "_PASSWORD",
+    "_EXTRA_HEADERS",
+    "_EXTRA_BODY",
+)
+_PERSIST_SECRETS_ENV = "STRIX_PERSIST_SECRETS"
+_CI_ENV_VARS = (
+    "CI",
+    "GITHUB_ACTIONS",
+    "GITLAB_CI",
+    "JENKINS_URL",
+    "BUILDKITE",
+    "CIRCLECI",
+    "TF_BUILD",
+)
+_TRUTHY = {"1", "true", "yes", "on"}
+
 
 def load_settings() -> Settings:
     """Resolve settings from env + JSON file + defaults. Memoized.
@@ -61,14 +84,24 @@ def apply_config_override(path: Path) -> None:
     logger.info("config override applied: %s", path)
 
 
-def persist_current() -> None:
+def persist_current(*, interactive: bool = True) -> None:
     """Merge currently-set env vars into the active config file (0o600).
 
     Values already in the file survive when their env var is unset, so a
     run that gets its settings from the file does not erase them. An env
     var set to the empty string clears the field from the file. A change to
     any linked LLM connection var drops the whole stored connection first.
+
+    Nothing is written for non-interactive (headless ``-n``) or CI runs, and
+    secret-bearing vars (API keys, tokens, extra headers/body, URLs with
+    embedded credentials) are only copied from the environment when
+    ``STRIX_PERSIST_SECRETS=1``. Secrets already in the file keep working.
     """
+    if not interactive or _running_in_ci():
+        logger.debug("persist_current: skipped for a non-interactive run")
+        return
+    persist_secrets = os.environ.get(_PERSIST_SECRETS_ENV, "").strip().lower() in _TRUTHY
+
     s = load_settings()
     target = _override or _DEFAULT_PATH
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -83,12 +116,27 @@ def persist_current() -> None:
             active = next((alias for alias in aliases if alias in os.environ), None)
             if active is None:
                 continue
+            value = os.environ[active]
+            if value and not persist_secrets and _is_secret(finfo, active, value):
+                continue  # leave any stored value as-is; never copy the env secret
             for alias in aliases:
                 env_block.pop(alias, None)
-            if os.environ[active]:
-                env_block[active] = os.environ[active]
+            if value:
+                env_block[active] = value
 
     write_secret_text(target, json.dumps({"env": env_block}, indent=2))
+
+
+def _running_in_ci() -> bool:
+    return any(os.environ.get(key) for key in _CI_ENV_VARS)
+
+
+def _is_secret(finfo: FieldInfo, alias: str, value: str) -> bool:
+    """Whether a setting's value is a credential that must not be persisted by default."""
+    if finfo.repr is False or alias.upper().endswith(_SECRET_SUFFIXES):
+        return True
+    # A base URL like https://user:pass@host carries credentials in its userinfo.
+    return "://" in value and "@" in value.split("://", 1)[1].split("/", 1)[0]
 
 
 def _aliases_for(finfo: FieldInfo) -> list[str]:

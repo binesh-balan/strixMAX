@@ -52,6 +52,21 @@ jobs:
           check-latest: true
           cache: false
 
+      # cryptography 49+ ships no Intel macOS wheel, so `uv sync --frozen`
+      # builds it from the locked (hash-checked) sdist here. That needs Rust,
+      # which the runner image provides, and OpenSSL headers from Homebrew.
+      # Linking OpenSSL statically keeps the PyInstaller bundle self-contained.
+      - name: Prepare cryptography source build (Intel macOS)
+        if: matrix.target == 'macos-x86_64'
+        shell: bash
+        run: |
+          brew list openssl@3 >/dev/null 2>&1 || brew install openssl@3
+          rustc --version
+          {
+            echo "OPENSSL_DIR=$(brew --prefix openssl@3)"
+            echo "OPENSSL_STATIC=1"
+          } >> "$GITHUB_ENV"
+
       - name: Build
         shell: bash
         env:
@@ -110,14 +125,39 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/')
     needs: build
     runs-on: ubuntu-latest
+    # Protected environment: configure required reviewers / tag rules for
+    # `release` in the repository settings.
+    environment: release
     permissions:
       contents: write
+      id-token: write
+      attestations: write
 
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
         with:
           path: release
           merge-multiple: true
+
+      - name: Generate SHA256SUMS
+        run: |
+          set -euo pipefail
+          cd release
+          find . -type f ! -name SHA256SUMS -printf '%P\n' | LC_ALL=C sort > ../asset-list.txt
+          if [ ! -s ../asset-list.txt ]; then
+            echo "::error::no release assets found"
+            exit 1
+          fi
+          # Assets are uploaded flat, so checksum entries use basenames.
+          while IFS= read -r asset; do
+            (cd "$(dirname "$asset")" && sha256sum "$(basename "$asset")")
+          done < ../asset-list.txt > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
+        with:
+          subject-checksums: release/SHA256SUMS
 
       - name: Create Release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2.6.2

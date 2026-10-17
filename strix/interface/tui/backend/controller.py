@@ -334,6 +334,11 @@ class TuiController:
         # prompt as much as for a named target, so a failure lands in the setup
         # log where the user can fix it and retry rather than in a dead run.
         await self._verify_model()
+        if not self.targets and not _mountable(Path.cwd()):
+            # Never offer $HOME, a system directory or a credentials folder;
+            # the prompt alone is the run's input then.
+            await self._begin_scan()
+            return {"started": True}
         if not self.targets:
             # Mounting the working directory needs the user's confirmation, and
             # that is asked in the live view. Enter it now and prepare nothing
@@ -519,3 +524,13 @@ class TuiController:
     def _require_setup_mutable(self) -> None:
         if not self.setup_mode or self.scan_started or self._start_in_progress:
             raise RuntimeError("Setup can no longer be changed after the scan starts")
+
+
+def _mountable(path: Path) -> bool:
+    from strix.interface.utils import check_mountable_dir
+
+    try:
+        check_mountable_dir(path)
+    except ValueError:
+        return False
+    return True

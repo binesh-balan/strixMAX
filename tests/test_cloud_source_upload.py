@@ -696,3 +696,96 @@ def test_oversize_archive_names_largest_files_and_exclude_guidance(
     assert "--exclude" in raised.value.next_step
     assert "--dry-run --show-files" in raised.value.next_step
     assert not list(tmp_path.glob("strix-source-*.zip"))
+
+
+def test_terraform_state_and_vars_are_secret_like(tmp_path: Path) -> None:
+    for name in (
+        "main.tf",
+        "prod.tfvars",
+        "prod.tfvars.json",
+        "terraform.tfstate",
+        "terraform.tfstate.backup",
+        "terraform.tfstate.d/staging/terraform.tfstate",
+        "terraform.tfstate.d/staging/notes.txt",
+    ):
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("x\n", encoding="utf-8")
+
+    manifest = source_upload.select_source(tmp_path)
+
+    assert [item.archive_name for item in manifest.files] == ["main.tf"]
+    assert manifest.excluded["sensitive_filename"] == 6
+    opted_in = source_upload.select_source(tmp_path, include_sensitive=True)
+    assert len(opted_in.files) == 7
+
+
+# Built at runtime so this test file does not itself trip secret scanners.
+_SECRET_SAMPLES = {
+    "aws.py": "key = 'AKIA" + "ABCDEFGHIJKLMNOP'\n",
+    "deploy.txt": "-----BEGIN RSA PRIVATE" + " KEY-----\nMIIB\n",
+    "ci.yml": "token: gh" + "p_" + "a" * 36 + "\n",
+    "notify.js": "const hook = 'xox" + "b-1234567890-abcdef';\n",
+}
+
+
+def test_files_with_secret_content_are_skipped_and_reported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    (tmp_path / "app.py").write_text("print('safe')\n", encoding="utf-8")
+    (tmp_path / "docs.md").write_text("AKIA is the AWS key prefix.\n", encoding="utf-8")
+    for name, content in _SECRET_SAMPLES.items():
+        (tmp_path / name).write_text(content, encoding="utf-8")
+
+    manifest = source_upload.select_source(tmp_path)
+
+    assert [item.archive_name for item in manifest.files] == ["app.py", "docs.md"]
+    assert manifest.excluded["secret_content"] == len(_SECRET_SAMPLES)
+    assert manifest.secret_content_files == tuple(sorted(_SECRET_SAMPLES))
+
+    monkeypatch.setattr(http, "request", lambda *_a, **_k: pytest.fail("dry-run made a request"))
+    assert (
+        cloud.run_cloud(["scans", "start", "--source", str(tmp_path), "--dry-run", "--json"]) == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["source"]["skipped_secret_files"] == sorted(_SECRET_SAMPLES)
+    assert payload["source"]["excluded_by_reason"]["secret_content"] == len(_SECRET_SAMPLES)
+
+    opted_in = source_upload.select_source(tmp_path, include_sensitive=True)
+    assert len(opted_in.files) == 2 + len(_SECRET_SAMPLES)
+    assert opted_in.secret_content_files == ()
+
+
+def test_secret_split_across_scan_chunks_is_found(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(source_upload, "_SECRET_SCAN_CHUNK", 16)
+    path = tmp_path / "blob.txt"
+    path.write_text("x" * 13 + "AKIA" + "ABCDEFGHIJKLMNOP" + "\n", encoding="utf-8")
+    assert source_upload._contains_secret(path) is True
+
+
+def test_clean_source_digest_is_unchanged_by_secret_scan(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text("print('safe')\n", encoding="utf-8")
+    first = source_upload.prepare_source(
+        str(tmp_path),
+        include_hidden=False,
+        include_sensitive=False,
+        include_archives=False,
+        exclude=[],
+    )
+    (tmp_path / "leak.py").write_text(_SECRET_SAMPLES["aws.py"], encoding="utf-8")
+    second = source_upload.prepare_source(
+        str(tmp_path),
+        include_hidden=False,
+        include_sensitive=False,
+        include_archives=False,
+        exclude=[],
+    )
+    try:
+        assert first.archive_sha256 == second.archive_sha256
+        assert "skipped_secret_files" not in first.summary(show_files=False)
+        assert second.summary(show_files=False)["skipped_secret_files"] == ["leak.py"]
+    finally:
+        source_upload.remove_bundle(first)
+        source_upload.remove_bundle(second)

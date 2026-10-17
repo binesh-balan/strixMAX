@@ -60,7 +60,16 @@ class McpConnectionConfig(BaseModel):
 
     allowed_tools: list[str] | None = None
     """Tool allowlist, applied after the server lists its tools. ``None`` (the
-    default) exposes every tool the server lists; a list restricts to it."""
+    default) lists every tool the server offers; a list restricts to it."""
+
+    allow_write_tools: bool = False
+    """Whether agents may call tools the server does not mark read-only.
+
+    Agents read attacker-controlled content, so a connection to a real system
+    (a database, a cloud account, a repository host) must not let injected text
+    drive writes or deletes. By default only tools annotated ``readOnlyHint``
+    can be called, plus any tool named explicitly in ``allowed_tools`` (naming a
+    tool is a deliberate operator choice). Set this to expose every tool."""
 
     active_tools: list[str] = Field(default_factory=list)
     """Small scan-relevant subset ranked ahead of the broader allowed catalog."""

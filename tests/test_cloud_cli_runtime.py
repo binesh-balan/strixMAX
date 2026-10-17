@@ -1028,7 +1028,9 @@ def test_source_upload_rejects_untrusted_destinations_before_reading_file(
         lambda *_args, **_kwargs: pytest.fail("an untrusted URL must not receive source bytes"),
     )
 
-    with pytest.raises(http.CloudError, match=r"(untrusted storage origin|storage API|invalid)"):
+    with pytest.raises(
+        http.CloudError, match=r"(untrusted storage origin|storage API|invalid|must use https)"
+    ):
         http.upload_file(signed_url, "upload-token", source)
 
 

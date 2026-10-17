@@ -12,6 +12,7 @@ from typing import Any, Literal, get_args
 
 from agents import RunContextWrapper, function_tool
 
+from strix.config import load_settings
 from strix.core.agents import ACTIVE_STATUSES, Status, coordinator_from_context
 from strix.core.execution import notify_parent_on_terminal
 from strix.core.hooks import LLM_TURN_KEY
@@ -560,6 +561,21 @@ async def create_agent(
             {
                 "success": False,
                 "error": "Scan runner did not provide a child-agent spawner in context",
+            },
+            ensure_ascii=False,
+            default=str,
+        )
+
+    max_agents = load_settings().runtime.max_agents
+    if len(coordinator.statuses) >= max_agents:
+        return json.dumps(
+            {
+                "success": False,
+                "error": (
+                    f"This scan already has {len(coordinator.statuses)} agents, the limit "
+                    f"(STRIX_MAX_AGENTS={max_agents}). Reuse existing agents or finish work."
+                ),
+                "agent_id": None,
             },
             ensure_ascii=False,
             default=str,

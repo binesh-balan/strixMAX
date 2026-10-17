@@ -304,7 +304,7 @@ export LLM_API_BASE="your-api-base-url"  # if using a local model, e.g. Ollama, 
 ```
 
 > [!NOTE]
-> Strix automatically saves your configuration to `~/.strix/cli-config.json`, so you don't have to re-enter it on every run.
+> In interactive runs Strix saves non-secret settings (such as `STRIX_LLM`) to `~/.strix/cli-config.json`, so you don't have to re-enter them on every run. API keys, tokens, and extra headers/body are only saved when you set `STRIX_PERSIST_SECRETS=1`, and nothing is saved for headless (`-n`) or CI runs.
 > See the [configuration reference](https://docs.strix.ai/advanced/configuration) for every environment variable.
 
 #### Sign in with a ChatGPT subscription

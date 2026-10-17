@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import sqlite3
@@ -265,13 +266,15 @@ def test_server_event_endpoint_forwards_cta(
         lambda cta, surface=None: seen.append((cta, surface)),
     )
 
-    httpd, url, _ = serve(run_dir, open_browser=False)
+    httpd, url, token = serve(run_dir, open_browser=False)
     try:
         body = json.dumps(
             {"event": "cta_clicked", "cta": "PR reviews", "surface": "sidebar_nav"}
         ).encode()
         req = urllib.request.Request(  # noqa: S310 - localhost test server
-            f"{url}/api/event", data=body, headers={"Content-Type": "application/json"}
+            f"{url}/api/event",
+            data=body,
+            headers={"Content-Type": "application/json", "Cookie": _session_cookie(url, token)},
         )
         with urllib.request.urlopen(req) as resp:  # noqa: S310  # nosec B310
             assert resp.status == 204
@@ -296,8 +299,9 @@ def test_server_event_endpoint_forwards_email_funnel(
         lambda step, purpose=None: seen.append((step, purpose)),
     )
 
-    httpd, url, _ = serve(run_dir, open_browser=False)
+    httpd, url, token = serve(run_dir, open_browser=False)
     try:
+        cookie = _session_cookie(url, token)
         # A whitelisted funnel event is forwarded; an unknown event is ignored.
         for payload, expected in (
             ({"event": "email_verified", "purpose": "report"}, [("email_verified", "report")]),
@@ -306,7 +310,7 @@ def test_server_event_endpoint_forwards_email_funnel(
             req = urllib.request.Request(  # noqa: S310 - localhost test server
                 f"{url}/api/event",
                 data=json.dumps(payload).encode(),
-                headers={"Content-Type": "application/json"},
+                headers={"Content-Type": "application/json", "Cookie": cookie},
             )
             with urllib.request.urlopen(req) as resp:  # noqa: S310  # nosec B310
                 assert resp.status == 204
@@ -325,12 +329,16 @@ def test_server_event_endpoint_forwards_agent_steered(
     seen: list[bool] = []
     monkeypatch.setattr("strix.telemetry.posthog.viewer_agent_steered", lambda: seen.append(True))
 
-    httpd, url, _ = serve(run_dir, open_browser=False)
+    httpd, url, token = serve(run_dir, open_browser=False)
     try:
+        # The SPA's sendBeacon posts a string body, which arrives as text/plain.
         req = urllib.request.Request(  # noqa: S310 - localhost test server
             f"{url}/api/event",
             data=json.dumps({"event": "agent_steered"}).encode(),
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "text/plain;charset=UTF-8",
+                "Cookie": _session_cookie(url, token),
+            },
         )
         with urllib.request.urlopen(req) as resp:  # noqa: S310  # nosec B310
             assert resp.status == 204
@@ -388,11 +396,23 @@ def _post(
         return exc.code, exc.read()
 
 
+def _raw_get(
+    url: str, path: str, headers: Mapping[str, str] | None = None
+) -> http.client.HTTPResponse:
+    """GET without following redirects, so the bootstrap 302 can be inspected."""
+    parts = urlsplit(url)
+    conn = http.client.HTTPConnection(parts.hostname or "127.0.0.1", parts.port)
+    conn.request("GET", path, headers=dict(headers or {}))
+    resp = conn.getresponse()
+    resp.read()
+    conn.close()
+    return resp
+
+
 def _session_cookie(url: str, token: str) -> str:
     """Bootstrap a session via the tokened URL and return its ``name=value`` cookie."""
-    bootstrap = f"{url}/?token={token}"
-    with urllib.request.urlopen(bootstrap) as resp:  # noqa: S310 - localhost test server  # nosec B310
-        raw = str(resp.headers.get("Set-Cookie", ""))
+    resp = _raw_get(url, f"/?token={token}")
+    raw = str(resp.headers.get("Set-Cookie", ""))
     return raw.split(";", 1)[0]
 
 
@@ -434,15 +454,28 @@ def test_capability_issued_only_for_tokened_bootstrap(
         with urllib.request.urlopen(url + "/") as resp:  # noqa: S310  # nosec B310
             assert resp.headers.get("Set-Cookie") is None
 
-        # A wrong token is likewise refused the capability.
-        with urllib.request.urlopen(f"{url}/?token=wrong") as resp:  # noqa: S310  # nosec B310
-            assert resp.headers.get("Set-Cookie") is None
+        # A wrong token is likewise refused the capability (but still stripped).
+        resp = _raw_get(url, "/?token=wrong")
+        assert resp.status == 302
+        assert resp.headers.get("Location") == "/"
+        assert resp.headers.get("Set-Cookie") is None
 
-        # Only the correct bootstrap token mints the session cookie.
-        with urllib.request.urlopen(f"{url}/?token={token}") as resp:  # noqa: S310  # nosec B310
-            cookie = str(resp.headers.get("Set-Cookie", ""))
+        # Only the correct bootstrap token mints the session cookie, and the
+        # response redirects to the same path without the token.
+        resp = _raw_get(url, f"/agents/root?token={token}&run=x")
+        assert resp.status == 302
+        assert resp.headers.get("Location") == "/agents/root?run=x"
+        cookie = str(resp.headers.get("Set-Cookie", ""))
         assert f"{_cookie_name(url)}=" in cookie
         assert "HttpOnly" in cookie and "SameSite=Strict" in cookie
+        assert "Secure" not in cookie  # plain-HTTP loopback
+        # The cookie value is a separate secret from the URL token.
+        assert token not in cookie
+
+        # The bootstrap token is single-use.
+        resp = _raw_get(url, f"/?token={token}")
+        assert resp.status == 302
+        assert resp.headers.get("Set-Cookie") is None
 
         # Static assets never carry it.
         with urllib.request.urlopen(url + "/assets/app.js") as resp:  # noqa: S310  # nosec B310

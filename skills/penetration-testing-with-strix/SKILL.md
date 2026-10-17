@@ -43,8 +43,9 @@ If unsure and the user has (or will create) an app.strix.ai account, prefer **Cl
 1. **Docker running** — check with `docker info`. The first scan pulls the sandbox image automatically.
 2. **Strix installed** — check with `strix --version`. Install if missing:
    ```bash
-   curl -sSL https://strix.ai/install | bash   # or: pipx install strix-agent
+   pipx install strix-agent==1.7.0   # or: uv tool install strix-agent==1.7.0
    ```
+   To use the standalone binary instead, download the installer, review it, then run it pinned (it verifies the release archive against the release's `SHA256SUMS`): `curl -fsSL -o strix-install.sh https://strix.ai/install && less strix-install.sh && STRIX_VERSION=1.7.0 bash strix-install.sh`. Avoid `curl ... | bash`.
 3. **LLM configured** — two environment variables:
    ```bash
    export STRIX_LLM="openai/gpt-5.4"      # any LiteLLM model id (openai/..., anthropic/..., openrouter/...)

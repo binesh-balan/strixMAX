@@ -48,7 +48,7 @@ SOURCE_SHA256="<reviewed source.archive_sha256>"
 strix cloud scans start --source . --approve-sha256 "$SOURCE_SHA256" --wait
 ```
 
-In a Git repository, Strix includes tracked files and untracked files that are not ignored. Hidden files, `.git`, symlinks, dependencies and build output, secret-like filenames, and nested archives are excluded by default. Use `.strixignore` or repeat `--exclude GLOB` for project-specific exclusions. `--include-hidden`, `--include-sensitive`, and `--include-archives` are explicit opt-ins.
+In a Git repository, Strix includes tracked files and untracked files that are not ignored. Hidden files, `.git`, symlinks, dependencies and build output, secret-like filenames (including Terraform `*.tfvars` and `*.tfstate`), and nested archives are excluded by default. Files whose contents match a high-confidence credential pattern (AWS access key IDs, PEM private keys, GitHub tokens, Slack tokens) are also left out and listed under `skipped_secret_files` in the manifest, so a `--dry-run` shows them. Use `.strixignore` or repeat `--exclude GLOB` for project-specific exclusions. `--include-hidden`, `--include-sensitive`, and `--include-archives` are explicit opt-ins.
 
 The CLI limits individual files, total expanded bytes, archive bytes, and file count. For an agent or CI handoff, repeat the same `--source`, `--exclude`, and `--include-*` flags with `--approve-sha256`; Strix refuses the upload if the rebuilt archive differs from the reviewed digest. `--yes` is a one-invocation approval for the snapshot built at that moment, not a digest-bound two-step approval.
 

@@ -32,16 +32,24 @@ name: Security Scan
 on:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   strix-scan:
+    # Secrets are not passed to fork PRs on `pull_request`; skip them explicitly
+    # rather than running without a key. Never switch to `pull_request_target`
+    # to "fix" this — it would run untrusted fork code with your LLM key.
+    if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
         with:
           fetch-depth: 0   # required for diff-scope resolution
+          persist-credentials: false
 
-      - name: Install Strix
-        run: curl -sSL https://strix.ai/install | bash
+      - name: Install Strix (pinned version)
+        run: pipx install strix-agent==1.7.0
 
       - name: Run Security Scan
         env:
@@ -66,6 +74,8 @@ jobs:
 Then tell the user to add two repository secrets: `STRIX_LLM` (model id, for example `openai/gpt-5.4`) and `LLM_API_KEY` (the provider key). Do not create these values yourself.
 
 Notes:
+- **Keep LLM keys away from untrusted code.** Run the scan only on `pull_request` events from branches in the same repository (the `if:` above), never on `pull_request_target` or `workflow_run` with a fork's code checked out. If fork PRs must be scanned, gate the job behind a protected environment with required reviewers (`environment: strix-scan`) so a maintainer approves each run after reading the diff. Give the key its own provider spend limit.
+- **Pin everything.** Actions are pinned to full commit SHAs with a version comment (let Dependabot/Renovate bump them), `persist-credentials: false` keeps the `GITHUB_TOKEN` out of `.git/config` where the scanned code could read it, and the Strix version is pinned (`strix-agent==1.7.0`) — bump it deliberately. To use the standalone binary instead, see "Installing without `curl | bash`" below.
 - In CI/headless runs Strix automatically scopes to the PR's changed files (`--scope-mode auto`). If diff resolution fails, keep `fetch-depth: 0` or set `--diff-base` to the PR's actual base branch — use `origin/${{ github.base_ref }}` in GitHub Actions rather than a hard-coded `origin/main`, since repos use different default branches.
 - Exit codes: `0` pass, `2` vulnerabilities found (fails the job), `1` setup error. Add `--fail-on high` to fail only on high/critical findings; lower ones are still reported, so a passing job is not a finding-free report.
 - The runner needs Docker (default GitHub-hosted Ubuntu runners have it).
@@ -78,17 +88,36 @@ Strix writes SARIF 2.1.0 to `strix_runs/<run>/findings.sarif`:
 ```yaml
       - name: Upload SARIF
         if: always()
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@48870fdd6b42ee6474ec4207209ff87609271a5e  # v4.39.0
         with:
           sarif_file: strix_runs
 ```
 
-## Other CI systems
+This step needs `security-events: write`; grant it on the `strix-scan` job only (`permissions: { contents: read, security-events: write }`), not workflow-wide.
 
-Any pipeline works the same way — install, set the two env vars, run headless:
+## Installing without `curl | bash`
+
+Do not pipe a remote script into a shell in CI. Either install the pinned package:
 
 ```bash
-curl -sSL https://strix.ai/install | bash
+pipx install strix-agent==1.7.0      # or: uv tool install strix-agent==1.7.0
+```
+
+or download the installer, review it, and run it pinned to a version (the installer verifies the release archive against the release's `SHA256SUMS` and aborts if no checksum is published):
+
+```bash
+curl -fsSL -o strix-install.sh https://strix.ai/install
+less strix-install.sh                 # review before running; or diff against a reviewed copy
+# Optionally pin the reviewed script: echo "<sha256>  strix-install.sh" | sha256sum -c -
+STRIX_VERSION=1.7.0 bash strix-install.sh
+```
+
+## Other CI systems
+
+Any pipeline works the same way — install a pinned version, set the two env vars, run headless. Expose the LLM key only to pipelines for trusted branches (for example GitLab protected variables), never to merge requests from forks:
+
+```bash
+pipx install strix-agent==1.7.0
 # Resolve the PR's base branch robustly (use your CI's base-branch variable if it
 # has one, for example GitHub Actions: origin/${{ github.base_ref }}). Avoid piping the
 # git lookup into another command — a failed lookup would otherwise be masked.
@@ -125,7 +154,7 @@ No workflow file, no Docker, no LLM key. Three ways to use it:
      env:
        STRIX_API_TOKEN: ${{ secrets.STRIX_API_TOKEN }}
      run: |
-       curl -sSL https://strix.ai/install | bash
+       pipx install strix-agent==1.7.0
        strix cloud pr-reviews start \
          --provider github \
          --installation-id "${{ vars.STRIX_INSTALLATION_ID }}" \

@@ -4,7 +4,7 @@ exclude: ^strix/interface/viewer/static/assets/
 repos:
   # Ruff for fast linting and formatting
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.15.20
+    rev: c59bba8fb259db0fec2bbb77ad8ba51ea7341b56  # frozen: v0.15.20
     hooks:
       - id: ruff
         args: [--fix, --exit-non-zero-on-fix]
@@ -27,7 +27,7 @@ repos:
 
   # Built-in hooks for basic file checks
   - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v5.0.0
+    rev: cef0300fd0fc4d2a87a85fa2093c6b283ea36f4b  # frozen: v5.0.0
     hooks:
       - id: trailing-whitespace
       - id: end-of-file-fixer
@@ -41,14 +41,14 @@ repos:
 
   # Security checks with bandit
   - repo: https://github.com/PyCQA/bandit
-    rev: 1.8.3
+    rev: 8ff25e07e487f143571cc305e56dd0253c60bc7b  # frozen: 1.8.3
     hooks:
       - id: bandit
         args: [-c, pyproject.toml]
 
   # Additional Python code quality checks
   - repo: https://github.com/asottile/pyupgrade
-    rev: v3.21.2
+    rev: 75992aaa40730136014f34227e0135f63fc951b4  # frozen: v3.21.2
     hooks:
       - id: pyupgrade
         args: [--py312-plus]

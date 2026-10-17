@@ -39,6 +39,8 @@ from strix.tools.mcp.session import McpConnectionUnavailableError
 if TYPE_CHECKING:
     from mcp.types import Tool as MCPTool
 
+    from strix.tools.mcp.config import McpConnectionConfig
+
 
 def _registry_from_ctx(ctx: RunContextWrapper) -> McpRegistry | None:
     context = ctx.context if isinstance(ctx.context, dict) else {}
@@ -254,6 +256,20 @@ async def get_mcp_tool_schema(
     }
 
 
+def tool_call_permitted(config: McpConnectionConfig | None, mcp_tool: Any) -> bool:
+    """Read-only tools are always callable; others need the operator's opt-in.
+
+    Without annotations MCP treats a tool as possibly destructive, so an
+    unannotated tool counts as a write tool here too.
+    """
+    if config is None or config.allow_write_tools:
+        return True
+    if config.allowed_tools is not None and mcp_tool.name in config.allowed_tools:
+        return True
+    annotations = getattr(mcp_tool, "annotations", None)
+    return bool(getattr(annotations, "readOnlyHint", False))
+
+
 @function_tool(timeout=120, strict_mode=False)
 async def call_mcp(
     ctx: RunContextWrapper,
@@ -302,11 +318,17 @@ async def call_mcp(
         available = await entry.ensure_catalog()
     except McpConnectionUnavailableError as exc:
         return _errored_tool_output(str(exc))
-    valid_names = {mcp_tool.name for mcp_tool in available}
-    if tool not in valid_names:
+    match = next((mcp_tool for mcp_tool in available if mcp_tool.name == tool), None)
+    if match is None:
         return (
             f"Unknown tool {tool!r} on MCP connection {connection!r}. "
             "Call search_mcp_tools, then get_mcp_tool_schema."
+        )
+    if not tool_call_permitted(entry.connection_config, match):
+        return (
+            f"Tool {tool!r} on MCP connection {connection!r} is not marked read-only, "
+            "and this connection only allows read-only tools. The operator can allow "
+            "it by listing it in allowed_tools or setting allow_write_tools."
         )
     session = await entry.ensure_connected()
     context = ctx.context if isinstance(ctx.context, dict) else {}

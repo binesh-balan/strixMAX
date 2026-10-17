@@ -484,14 +484,14 @@ PROGRAMMING:
 - Python 3, uv, Node.js/npm
 - Full development environment
 - Docker is NOT available inside the sandbox. Do not run docker; rely on provided tools to run locally.
-- You can install any additional tools/packages needed based on the task/context using package managers (apt, pip, npm, etc.)
+- You can install additional tools/packages in user space (pipx, pip install --user, npm -g, go install). apt is not available because there is no root access.
 
 Directories:
-- /workspace - where you should work.
+- /workspace - where you should work. Local source trees under /workspace are usually mounted read-only; copy one to /tmp before building or modifying it.
 - /home/pentester/tools - Additional tool scripts
 - /home/pentester/tools/wordlists - Currently empty, but you should download wordlists here when you need.
 
-Default user: pentester (sudo available)
+Default user: pentester (no sudo and no root access; install extra tools in user space with pipx, pip install --user, go install or npm -g, which are on PATH)
 </environment>
 
 {% if shared_skill_names %}

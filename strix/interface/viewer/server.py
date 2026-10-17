@@ -10,14 +10,21 @@ Design notes:
 - All reads happen per-request straight from disk, so the same server serves a
   live in-progress run and a finished one identically; the SPA distinguishes
   them via the ``finished`` flag on /api/run.
+- Request hardening: every request's Host header must name this server (a
+  loopback name, an IP literal, or the bound host) to defeat DNS rebinding;
+  POSTs must be same-origin JSON with a bounded body; and the bootstrap token
+  is single-use and stripped from the address bar by a redirect.
 """
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import mimetypes
+import re
 import secrets
+import ssl
 import threading
 import webbrowser
 from http import HTTPStatus
@@ -113,6 +120,22 @@ def resolve_run_dir(base_dir: Path, run_param: str | None, default_run_dir: Path
 # otherwise share one cookie slot and clobber each other's session.
 SESSION_COOKIE_PREFIX = "strix_viewer_session"
 
+# Largest POST body the viewer reads. Every endpoint takes a small JSON object;
+# anything bigger is refused with 413 before it is read.
+MAX_BODY_BYTES = 1 << 20
+
+# POST endpoints that may also arrive as text/plain: the committed SPA bundle
+# sends /api/event with navigator.sendBeacon(string), which cannot set a JSON
+# content type. It carries only an allowlisted telemetry event name.
+_TEXT_PLAIN_POSTS = frozenset({"/api/event"})
+
+_TOKEN_QUERY_RE = re.compile(r"(token=)[^&\s\"]*", re.IGNORECASE)
+
+
+def redact_token(text: str) -> str:
+    """Mask ``token=`` query values so the bootstrap token never reaches a log."""
+    return _TOKEN_QUERY_RE.sub(r"\1<redacted>", text)
+
 
 class _ViewerState:
     def __init__(
@@ -130,18 +153,34 @@ class _ViewerState:
         # launcher), which can deliver a message to a running agent. Absent for
         # standalone ``strix view`` / finished runs, so steering is unavailable.
         self.steer_handler = steer_handler
-        # Unguessable per-process capability. It is minted here, printed/opened
-        # for the operator who started the server (see ``authorized_url``), and
-        # exchanged for a session cookie only when presented on the initial page
-        # load. It is the request-level authorization the review asked for:
-        # reachability of the port (e.g. when bound with ``--host``) is not
+        # Unguessable per-process bootstrap capability. It is minted here,
+        # printed/opened for the operator who started the server (see
+        # ``authorized_url``), and exchanged -- once -- for a session cookie.
+        # Reachability of the port (e.g. when bound with ``--host``) is not
         # enough to read run data, steer a live scan, trigger a report, or
         # browse history -- the token is never handed to a caller who merely
         # reaches ``/``.
+        self.bootstrap_token = secrets.token_urlsafe(32)
+        self._bootstrap_used = False
+        self._bootstrap_lock = threading.Lock()
+        # The cookie value is a separate secret, so the URL token (which can
+        # sit in shell scrollback or a TUI screen) is not itself a session.
         self.session_token = secrets.token_urlsafe(32)
         # Finalized in ``serve()`` once the port is known (the server binds
         # after this state is constructed); see SESSION_COOKIE_PREFIX.
         self.cookie_name = SESSION_COOKIE_PREFIX
+        self.host = "127.0.0.1"
+        self.port = 0
+
+    def redeem_bootstrap(self, supplied: str) -> bool:
+        """Accept the bootstrap token exactly once."""
+        if not supplied:
+            return False
+        with self._bootstrap_lock:
+            if self._bootstrap_used or not secrets.compare_digest(supplied, self.bootstrap_token):
+                return False
+            self._bootstrap_used = True
+            return True
 
 
 def _make_handler(state: _ViewerState) -> type[BaseHTTPRequestHandler]:
@@ -149,16 +188,22 @@ def _make_handler(state: _ViewerState) -> type[BaseHTTPRequestHandler]:
         server_version = "StrixViewer/1.0"
 
         def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
-            logger.debug("viewer %s - %s", self.address_string(), format % args)
+            logger.debug("viewer %s - %s", self.address_string(), redact_token(format % args))
 
         def do_GET(self) -> None:
             parts = urlsplit(self.path)
             path = parts.path
+            if not self._host_allowed():
+                self._send_json(HTTPStatus.MISDIRECTED_REQUEST, {"error": "invalid_host"})
+                return
             try:
-                if path.startswith("/api/"):
-                    self._handle_api(path, parse_qs(parts.query))
+                query = parse_qs(parts.query)
+                if "token" in query and not path.startswith("/api/"):
+                    self._handle_bootstrap(path, query)
+                elif path.startswith("/api/"):
+                    self._handle_api(path, query)
                 else:
-                    self._handle_static(path, parse_qs(parts.query))
+                    self._handle_static(path)
             except BrokenPipeError:
                 # The browser closed the connection mid-response (e.g. it
                 # navigated away between polls). Not an error.
@@ -170,6 +215,8 @@ def _make_handler(state: _ViewerState) -> type[BaseHTTPRequestHandler]:
 
         def do_POST(self) -> None:
             path = urlsplit(self.path).path
+            if not self._post_allowed(path):
+                return
             try:
                 if path == "/api/event":
                     self._handle_event()
@@ -194,8 +241,84 @@ def _make_handler(state: _ViewerState) -> type[BaseHTTPRequestHandler]:
                 logger.exception("viewer request failed: POST %s", path)
                 self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "internal error"})
 
+        def _post_allowed(self, path: str) -> bool:
+            """CSRF / DNS-rebinding / size gate shared by every POST endpoint.
+
+            Answers the request itself and returns False when it is refused.
+            """
+            if not self._host_allowed():
+                self._send_json(HTTPStatus.MISDIRECTED_REQUEST, {"error": "invalid_host"})
+                return False
+            if not self._origin_allowed():
+                self._send_json(HTTPStatus.FORBIDDEN, {"error": "cross_origin"})
+                return False
+            content_type = self.headers.get_content_type()
+            allowed_types = {"application/json"}
+            if path in _TEXT_PLAIN_POSTS:
+                allowed_types.add("text/plain")
+            if content_type not in allowed_types:
+                self._send_json(
+                    HTTPStatus.UNSUPPORTED_MEDIA_TYPE, {"error": "unsupported_media_type"}
+                )
+                return False
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                length = -1
+            if length < 0:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_length"})
+                return False
+            if length > MAX_BODY_BYTES:
+                self._send_json(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, {"error": "too_large"})
+                return False
+            self._content_length = length
+            return True
+
+        def _host_allowed(self) -> bool:
+            """Reject Host headers that don't name this server (DNS rebinding).
+
+            A rebinding page reaches the loopback port under the attacker's own
+            hostname, which the browser then sends as Host. Loopback names, IP
+            literals (which cannot be rebound), and the bound host are accepted.
+            """
+            raw = (self.headers.get("Host") or "").strip()
+            if not raw:
+                return False
+            try:
+                parsed = urlsplit(f"//{raw}")
+                hostname = (parsed.hostname or "").lower()
+                port = parsed.port
+            except ValueError:
+                return False
+            if (port or 80) != state.port:
+                return False
+            if hostname in {"localhost", state.host.lower().strip("[]")}:
+                return True
+            try:
+                ipaddress.ip_address(hostname)
+            except ValueError:
+                return False
+            return True
+
+        def _origin_allowed(self) -> bool:
+            """Only same-origin browser requests may POST.
+
+            Browsers always send Origin on a cross-origin POST, so a missing
+            Origin is refused only when Fetch Metadata says the request came
+            from another site. Non-browser clients send neither.
+            """
+            origin = self.headers.get("Origin")
+            if origin is None:
+                site = (self.headers.get("Sec-Fetch-Site") or "").strip().lower()
+                return site in {"", "same-origin", "none"}
+            expected = f"{self._scheme()}://{self.headers.get('Host', '').strip()}"
+            return origin.strip().lower() == expected.lower()
+
+        def _scheme(self) -> str:
+            return "https" if isinstance(self.connection, ssl.SSLSocket) else "http"
+
         def _read_body(self) -> dict[str, Any]:
-            length = int(self.headers.get("Content-Length") or 0)
+            length = getattr(self, "_content_length", 0)
             raw = self.rfile.read(length) if length else b""
             try:
                 body = json.loads(raw or b"{}")
@@ -211,6 +334,11 @@ def _make_handler(state: _ViewerState) -> type[BaseHTTPRequestHandler]:
         )
 
         def _handle_event(self) -> None:
+            # Session-gated like every other POST so a page that merely reaches
+            # the port cannot inject telemetry.
+            if not self._has_session():
+                self._send_json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+                return
             body = self._read_body()
             # Forwarded as anonymous PostHog events that respect the global
             # telemetry opt-out. Never forward the email, code, or report body:
@@ -480,30 +608,50 @@ def _make_handler(state: _ViewerState) -> type[BaseHTTPRequestHandler]:
         def _has_session(self) -> bool:
             """True when the request carries this process's session capability.
 
-            The cookie is set only when the SPA is served (index.html), so only
-            the browser this process handed the page to can pass. A direct
+            The cookie is set only by the single-use bootstrap redirect, so only
+            the browser this process handed the link to can pass. A direct
             caller on an exposed port has no cookie and is rejected.
             """
             supplied = self._cookies().get(state.cookie_name, "")
             return bool(supplied) and secrets.compare_digest(supplied, state.session_token)
 
-        def _token_presented(self, query: dict[str, list[str]]) -> bool:
-            """True when the request carries the correct bootstrap token.
+        def _handle_bootstrap(self, path: str, query: dict[str, list[str]]) -> None:
+            """Trade a ``?token=`` page load for the session cookie, then drop the token.
 
-            The token reaches the operator's browser through the URL printed /
-            opened by the process that started the server, a channel an
-            arbitrary network caller on an exposed port cannot observe.
+            Always answers with a redirect to the same path without ``token``, so
+            the bootstrap token never stays in the address bar, history, or a
+            Referer. The cookie is set only the first time the correct token is
+            presented; a browser that already holds the cookie keeps working.
             """
             supplied = (query.get("token") or [""])[0]
-            return bool(supplied) and secrets.compare_digest(supplied, state.session_token)
+            remaining = {key: values for key, values in query.items() if key != "token"}
+            # Never a scheme-relative (``//host``) location: always this server.
+            location = "/" + path.lstrip("/")
+            if remaining:
+                location += "?" + urlencode(remaining, doseq=True)
+            self.send_response(HTTPStatus.FOUND)
+            self.send_header("Location", location)
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("Content-Length", "0")
+            if state.redeem_bootstrap(supplied):
+                # HttpOnly (JS never needs it; fetch sends it automatically),
+                # SameSite=Strict (never sent from a cross-site context), and
+                # Secure whenever the viewer is served over TLS.
+                secure = "; Secure" if self._scheme() == "https" else ""
+                self.send_header(
+                    "Set-Cookie",
+                    f"{state.cookie_name}={state.session_token}; Path=/; HttpOnly; "
+                    f"SameSite=Strict{secure}",
+                )
+            self.end_headers()
 
-        def _handle_static(self, path: str, query: dict[str, list[str]]) -> None:
+        def _handle_static(self, path: str) -> None:
             target = self._resolve_asset(path)
             if target is None:
                 # SPA fallback: unknown non-asset routes render index.html so
                 # client-side deep links work.
                 target = state.assets_dir / "index.html"
-            is_index = target.name == "index.html"
             if not target.is_file():
                 self._send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
                 return
@@ -512,16 +660,7 @@ def _make_handler(state: _ViewerState) -> type[BaseHTTPRequestHandler]:
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", content_type or "application/octet-stream")
             self.send_header("Content-Length", str(len(content)))
-            if is_index and self._token_presented(query):
-                # Exchange the bootstrap token for the per-process session
-                # capability. Issued only when the correct token is presented,
-                # so a caller who merely reaches ``/`` never obtains it.
-                # HttpOnly (JS never needs it; fetch sends it automatically) and
-                # SameSite=Strict (never sent from a cross-site context).
-                self.send_header(
-                    "Set-Cookie",
-                    f"{state.cookie_name}={state.session_token}; Path=/; HttpOnly; SameSite=Strict",
-                )
+            self.send_header("Referrer-Policy", "no-referrer")
             self.end_headers()
             self.wfile.write(content)
 
@@ -548,13 +687,24 @@ def _make_handler(state: _ViewerState) -> type[BaseHTTPRequestHandler]:
     return ViewerHandler
 
 
+def is_loopback_host(host: str) -> bool:
+    """True for ``localhost`` and loopback IP literals (127.0.0.0/8, ::1)."""
+    host = host.strip().strip("[]").lower()
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 def authorized_url(base_url: str, token: str) -> str:
     """URL that bootstraps the viewer session for the operator.
 
     Presenting ``token`` on the initial page load is what mints the session
     cookie, so this URL is printed / opened only for the operator who started
-    the server. Sharing it (rather than the bare ``base_url``) is what lets a
-    trusted remote user authorize when the viewer is exposed with ``--host``.
+    the server. The token is single-use: the first browser to open the link
+    gets the session, and the server immediately redirects to a token-free URL.
     """
     return f"{base_url}/?{urlencode({'token': token})}"
 
@@ -570,7 +720,8 @@ def serve(
     """Start the viewer server on a background thread; return (server, url, token).
 
     ``url`` is the bare base; pass it through ``authorized_url(url, token)`` to
-    build the operator link that authorizes the browser.
+    build the operator link that authorizes the browser. ``token`` is the
+    single-use bootstrap token, not the session cookie value.
 
     Binds an ephemeral port by default. If a fixed ``port`` is requested but in
     use, falls back to an ephemeral port. Reused by both the ``strix view``
@@ -595,22 +746,33 @@ def serve(
     httpd.daemon_threads = True
     bound_port = int(httpd.server_address[1])
     state.cookie_name = f"{SESSION_COOKIE_PREFIX}_{bound_port}"
-    url = f"http://{host}:{bound_port}"
+    state.host = host
+    state.port = bound_port
+    url_host = f"[{host}]" if ":" in host else host
+    url = f"http://{url_host}:{bound_port}"
 
     thread = threading.Thread(target=httpd.serve_forever, name="strix-viewer", daemon=True)
     thread.start()
 
     if open_browser:
-        _open_browser(authorized_url(url, state.session_token))
+        _open_browser(authorized_url(url, state.bootstrap_token))
 
-    return httpd, url, state.session_token
+    return httpd, url, state.bootstrap_token
 
 
 def _open_browser(url: str) -> None:
     try:
         webbrowser.open(url)
     except Exception:  # noqa: BLE001 - launching the browser is best-effort
-        logger.debug("could not open browser for %s", url, exc_info=True)
+        logger.debug("could not open browser for %s", redact_token(url), exc_info=True)
 
 
-__all__ = ["authorized_url", "bundle_dir", "bundle_is_built", "serve"]
+__all__ = [
+    "MAX_BODY_BYTES",
+    "authorized_url",
+    "bundle_dir",
+    "bundle_is_built",
+    "is_loopback_host",
+    "redact_token",
+    "serve",
+]

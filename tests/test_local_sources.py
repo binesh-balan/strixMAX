@@ -34,9 +34,14 @@ def test_collect_local_sources_protects_the_users_own_git() -> None:
             "source_path": "/code",
             "workspace_subdir": "repo",
             "protect_metadata": True,
-            "read_only": False,
+            "read_only": True,
         }
     ]
+
+
+def test_collect_local_sources_is_writable_only_on_request() -> None:
+    sources = collect_local_sources([_local_target("/code")], writable=True)
+    assert sources[0]["read_only"] is False
 
 
 def test_collect_local_sources_forwards_read_only() -> None:
@@ -103,30 +108,41 @@ def test_infer_target_type_guards_sensitive_dirs_by_default(
 def test_workspace_mount_is_mounted_without_becoming_a_target(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A workspace mount reaches the sandbox but carries no target semantics.
-
-    It is the directory the agent works in, so it is exempt from the guard that
-    refuses home directories for scan targets, and it never enters targets_info.
-    """
+    """A workspace mount reaches the sandbox read-only and never enters targets_info."""
     home = tmp_path / "home"
-    home.mkdir()
+    project = home / "project"
+    project.mkdir(parents=True)
     monkeypatch.setattr(Path, "home", classmethod(lambda _cls: home))
-    args = argparse.Namespace(targets_info=[], local_sources=[], workspace_mount=str(home))
+    args = argparse.Namespace(targets_info=[], local_sources=[], workspace_mount=str(project))
 
     attach_workspace_mount(args)
 
     assert args.targets_info == []
     assert args.local_sources == [
         {
-            "source_path": str(home),
+            "source_path": str(project),
             "workspace_subdir": args.workspace_subdir,
             "protect_metadata": True,
+            "read_only": True,
         }
     ]
     # It is a real bind mount, so the sandbox exposes it under /workspace.
     assert build_bind_mounts(args.local_sources)[0]["target"] == (
         f"/workspace/{args.workspace_subdir}"
     )
+
+
+def test_workspace_mount_refuses_the_home_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The mount guard applies to workspace mounts too, so $HOME never reaches the agent."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda _cls: home))
+    args = argparse.Namespace(targets_info=[], local_sources=[], workspace_mount=str(home))
+
+    with pytest.raises(ValueError, match="home directory"):
+        attach_workspace_mount(args)
 
 
 def test_workspace_mount_absent_leaves_local_sources_alone() -> None:

@@ -2,9 +2,22 @@
 
 set -euo pipefail
 
+# Environment overrides:
+#   STRIX_INSTALL_REPO  GitHub "owner/repo" to install releases from
+#                       (default: usestrix/strix). Only point this at a
+#                       repository you trust: its release assets are installed.
+#   STRIX_VERSION       Release version to install, e.g. "1.7.0" (default:
+#                       latest release). `VERSION` is accepted as a legacy alias.
+#   STRIX_IMAGE         Sandbox image to pre-pull. Keep in sync with the default
+#                       in strix/config/settings.py; enterprises should use an
+#                       internal `@sha256:` reference.
+#
+# Every downloaded archive is verified against the release's SHA256SUMS asset.
+# If no checksum is published for the archive, installation is aborted.
+
 APP=strix
-REPO="usestrix/strix"
-STRIX_IMAGE="ghcr.io/usestrix/strix-sandbox:1.3.0"
+REPO="${STRIX_INSTALL_REPO:-usestrix/strix}"
+STRIX_IMAGE="${STRIX_IMAGE:-ghcr.io/usestrix/strix-sandbox:1.3.0}"
 
 MUTED='\033[0;2m'
 RED='\033[0;31m'
@@ -13,8 +26,21 @@ YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
-requested_version=${VERSION:-}
+requested_version=${STRIX_VERSION:-${VERSION:-}}
+requested_version=${requested_version#v}
 SKIP_DOWNLOAD=false
+
+if [[ ! "$REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+    echo -e "${RED}Invalid STRIX_INSTALL_REPO '$REPO' (expected owner/repo)${NC}"
+    exit 1
+fi
+if [ "$REPO" != "usestrix/strix" ]; then
+    echo -e "${YELLOW}⚠ Installing from non-default repository: ${NC}$REPO"
+fi
+if [[ -n "$requested_version" && ! "$requested_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.+-][A-Za-z0-9.+-]+)?$ ]]; then
+    echo -e "${RED}Invalid STRIX_VERSION '$requested_version'${NC}"
+    exit 1
+fi
 
 raw_os=$(uname -s)
 os=$(echo "$raw_os" | tr '[:upper:]' '[:lower:]')
@@ -85,6 +111,18 @@ fi
 
 filename="$APP-${specific_version}-${target}${archive_ext}"
 url="https://github.com/$REPO/releases/download/v${specific_version}/$filename"
+checksums_url="https://github.com/$REPO/releases/download/v${specific_version}/SHA256SUMS"
+
+sha256_of() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        echo -e "${RED}Error: sha256sum or shasum is required to verify the download.${NC}" >&2
+        return 1
+    fi
+}
 
 print_message() {
     local level=$1
@@ -111,18 +149,14 @@ check_existing_installation() {
                 continue
             fi
 
+            # Never delete other binaries named `strix`: they may be unrelated
+            # programs. Warn and let the user decide.
             if [[ -n "$path" ]]; then
-                echo -e "${MUTED}Found existing strix at: ${NC}$path"
-
+                echo -e "${YELLOW}⚠ Found another strix on PATH: ${NC}$path"
                 if [[ "$path" == *".local/bin"* ]]; then
-                    echo -e "${MUTED}Removing old pipx installation...${NC}"
-                    if command -v pipx >/dev/null 2>&1; then
-                        pipx uninstall strix-agent 2>/dev/null || true
-                    fi
-                    rm -f "$path" 2>/dev/null || true
-                elif [[ -L "$path" || -f "$path" ]]; then
-                    echo -e "${MUTED}Removing old installation...${NC}"
-                    rm -f "$path" 2>/dev/null || true
+                    echo -e "${MUTED}If this is an old pipx install, remove it with: ${NC}pipx uninstall strix-agent"
+                else
+                    echo -e "${MUTED}If this is an old Strix install, remove it manually so $INSTALL_DIR/strix takes precedence.${NC}"
                 fi
             fi
         done
@@ -151,12 +185,30 @@ download_and_install() {
     cd "$tmp_dir"
 
     echo -e "${MUTED}Downloading...${NC}"
-    curl -# -L -o "$filename" "$url"
-
-    if [ ! -f "$filename" ]; then
+    if ! curl -# -fL -o "$filename" "$url" || [ ! -f "$filename" ]; then
         echo -e "${RED}Download failed${NC}"
         exit 1
     fi
+
+    echo -e "${MUTED}Verifying checksum...${NC}"
+    if ! curl -fsSL -o SHA256SUMS "$checksums_url"; then
+        echo -e "${RED}No SHA256SUMS published for v${specific_version}; refusing to install an unverified binary.${NC}"
+        exit 1
+    fi
+    local expected actual
+    expected=$(awk -v f="$filename" '$2 == f || $2 == "*" f {print $1; exit}' SHA256SUMS)
+    if [[ ! "$expected" =~ ^[0-9a-fA-F]{64}$ ]]; then
+        echo -e "${RED}No checksum for $filename in SHA256SUMS; refusing to install.${NC}"
+        exit 1
+    fi
+    actual=$(sha256_of "$filename")
+    if [ "$(echo "$expected" | tr '[:upper:]' '[:lower:]')" != "$actual" ]; then
+        echo -e "${RED}Checksum mismatch for $filename${NC}"
+        echo -e "${MUTED}expected: ${NC}$expected"
+        echo -e "${MUTED}actual:   ${NC}$actual"
+        exit 1
+    fi
+    echo -e "${GREEN}✓ Checksum verified${NC}"
 
     echo -e "${MUTED}Extracting...${NC}"
     if [ "$os" = "windows" ]; then
@@ -297,14 +349,7 @@ verify_installation() {
     if [[ "$which_strix" != "$INSTALL_DIR/strix" && "$which_strix" != "$INSTALL_DIR/strix.exe" ]]; then
         if [[ -n "$which_strix" ]]; then
             echo -e "${YELLOW}⚠ Found conflicting strix at: ${NC}$which_strix"
-            echo -e "${MUTED}Attempting to remove...${NC}"
-
-            if rm -f "$which_strix" 2>/dev/null; then
-                echo -e "${GREEN}✓ Removed conflicting installation${NC}"
-            else
-                echo -e "${YELLOW}Could not remove automatically.${NC}"
-                echo -e "${MUTED}Please remove manually: ${NC}rm $which_strix"
-            fi
+            echo -e "${MUTED}It takes precedence over $INSTALL_DIR/strix. If it is an old Strix install, remove it manually.${NC}"
         fi
     fi
 

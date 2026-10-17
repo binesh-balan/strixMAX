@@ -430,8 +430,6 @@ class ReportState:
 
         self.vulnerability_reports.append(report)
         logger.info(f"Added vulnerability report: {report_id} - {title}")
-        posthog.finding(severity, cwe=cwe, is_cve=bool(cve))
-        scarf.finding(severity, cwe=cwe, is_cve=bool(cve))
 
         self.save_run_data()
         return report_id

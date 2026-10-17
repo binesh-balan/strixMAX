@@ -100,7 +100,7 @@ def test_direct_launch_with_a_bad_key_prints_the_panel_and_exits_before_the_tui(
         "_print_model_connection_error",
         lambda exc: calls.append(f"panel:{exc}"),
     )
-    monkeypatch.setattr(cli_main, "persist_current", lambda: calls.append("persist"))
+    monkeypatch.setattr(cli_main, "persist_current", lambda **_kw: calls.append("persist"))
     monkeypatch.setattr(cli_main, "prepare_run", lambda _args: calls.append("prepare"))
     monkeypatch.setattr(cli_main, "set_scan_phase", lambda _phase: None)
 

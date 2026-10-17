@@ -49,7 +49,7 @@ _LLM_ENV_KEYS = [
 @pytest.fixture(autouse=True)
 def _reset_loader_state(monkeypatch: pytest.MonkeyPatch) -> None:
     """Reset module globals and clear known env vars for deterministic runs."""
-    for key in _LLM_ENV_KEYS:
+    for key in (*_LLM_ENV_KEYS, *loader._CI_ENV_VARS, "STRIX_PERSIST_SECRETS"):
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setattr(loader, "_cached", None)
     monkeypatch.setattr(loader, "_override", None)
@@ -254,6 +254,7 @@ def test_persist_current_env_overrides_file_value(
     loader.apply_config_override(target)
     monkeypatch.setenv("PERPLEXITY_API_KEY", "env-pplx")
 
+    monkeypatch.setenv("STRIX_PERSIST_SECRETS", "1")
     loader.persist_current()
 
     assert json.loads(target.read_text(encoding="utf-8")) == {
@@ -306,6 +307,7 @@ def test_linked_llm_key_change_drops_stored_model(
 
     assert loader.load_settings().llm.model is None
 
+    monkeypatch.setenv("STRIX_PERSIST_SECRETS", "1")
     loader.persist_current()
 
     assert json.loads(target.read_text(encoding="utf-8")) == {"env": {"LLM_API_KEY": "new-key"}}
@@ -362,6 +364,7 @@ def test_persist_current_env_alias_replaces_other_alias_in_file(
     loader.apply_config_override(target)
     monkeypatch.setenv("LLM_API_KEY", "new-key")
 
+    monkeypatch.setenv("STRIX_PERSIST_SECRETS", "1")
     loader.persist_current()
 
     assert json.loads(target.read_text(encoding="utf-8")) == {"env": {"LLM_API_KEY": "new-key"}}
@@ -427,6 +430,7 @@ def test_persisted_json_object_setting_reloads_without_env(
     loader.apply_config_override(tmp_path / "cli-config.json")
     monkeypatch.setenv(env_var, '{"X-Tenant": "acme"}')
     loader.load_settings()
+    monkeypatch.setenv("STRIX_PERSIST_SECRETS", "1")
     loader.persist_current()
     monkeypatch.delenv(env_var)
     loader.apply_config_override(tmp_path / "cli-config.json")
@@ -471,3 +475,106 @@ def test_persist_current_sets_0600_mode(tmp_path: Path, monkeypatch: pytest.Monk
     loader.persist_current()
 
     assert target.stat().st_mode & 0o777 == 0o600
+
+
+# --------------------------------------------------------------------------- #
+# persist_current: secrets and non-interactive runs
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "env_var",
+    [
+        "LLM_API_KEY",
+        "OPENAI_API_KEY",
+        "PERPLEXITY_API_KEY",
+        "DEDUPE_LLM_API_KEY",
+        "POSTMAN_API_KEY",
+        "LLM_EXTRA_HEADERS",
+        "LLM_EXTRA_BODY",
+        "DEDUPE_LLM_EXTRA_HEADERS",
+    ],
+)
+def test_persist_current_never_writes_env_secrets_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, env_var: str
+) -> None:
+    target = tmp_path / "cli-config.json"
+    loader.apply_config_override(target)
+    monkeypatch.setenv("STRIX_REASONING_EFFORT", "low")
+    secret = '{"Authorization": "Bearer s3cr3t"}' if "EXTRA" in env_var else "s3cr3t"
+    monkeypatch.setenv(env_var, secret)
+
+    loader.persist_current()
+
+    saved = target.read_text(encoding="utf-8")
+    assert "s3cr3t" not in saved
+    assert json.loads(saved) == {"env": {"STRIX_REASONING_EFFORT": "low"}}
+
+
+def test_persist_current_skips_api_base_with_credentials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "cli-config.json"
+    loader.apply_config_override(target)
+    monkeypatch.setenv("LLM_API_BASE", "https://user:s3cr3t@llm.internal/v1")
+
+    loader.persist_current()
+
+    assert "s3cr3t" not in target.read_text(encoding="utf-8")
+
+
+def test_persist_current_keeps_stored_secret_when_env_secret_is_skipped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "cli-config.json"
+    target.write_text(json.dumps({"env": {"PERPLEXITY_API_KEY": "file-pplx"}}), encoding="utf-8")
+    loader.apply_config_override(target)
+    monkeypatch.setenv("PERPLEXITY_API_KEY", "env-pplx")
+
+    loader.persist_current()
+
+    assert json.loads(target.read_text(encoding="utf-8")) == {
+        "env": {"PERPLEXITY_API_KEY": "file-pplx"}
+    }
+    monkeypatch.delenv("PERPLEXITY_API_KEY")
+    loader.apply_config_override(target)
+    assert loader.load_settings().integrations.perplexity_api_key == "file-pplx"
+
+
+def test_persist_current_opt_in_writes_secrets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "cli-config.json"
+    loader.apply_config_override(target)
+    monkeypatch.setenv("LLM_API_KEY", "opted-in")
+    monkeypatch.setenv("STRIX_PERSIST_SECRETS", "1")
+
+    loader.persist_current()
+
+    assert json.loads(target.read_text(encoding="utf-8")) == {"env": {"LLM_API_KEY": "opted-in"}}
+
+
+def test_persist_current_skips_headless_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "cli-config.json"
+    loader.apply_config_override(target)
+    monkeypatch.setenv("STRIX_LLM", "headless-model")
+
+    loader.persist_current(interactive=False)
+
+    assert not target.exists()
+
+
+@pytest.mark.parametrize("ci_var", ["CI", "GITHUB_ACTIONS", "GITLAB_CI"])
+def test_persist_current_skips_ci_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ci_var: str
+) -> None:
+    target = tmp_path / "cli-config.json"
+    loader.apply_config_override(target)
+    monkeypatch.setenv("STRIX_LLM", "ci-model")
+    monkeypatch.setenv(ci_var, "true")
+
+    loader.persist_current()
+
+    assert not target.exists()

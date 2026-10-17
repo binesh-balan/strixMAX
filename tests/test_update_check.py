@@ -16,6 +16,9 @@ def _isolated_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(update_check, "_CACHE_PATH", tmp_path / "update-check.json")
     monkeypatch.setattr(update_check, "_background_thread", None)
     monkeypatch.delenv("STRIX_NO_UPDATE_CHECK", raising=False)
+    monkeypatch.setenv("STRIX_UPDATE_CHECK", "1")
+    monkeypatch.delenv("STRIX_UPDATE_REPO", raising=False)
+    monkeypatch.delenv("STRIX_UPDATE_PYPI_PACKAGE", raising=False)
     for key in ("CI", "GITHUB_ACTIONS", "GITLAB_CI", "JENKINS_URL", "BUILDKITE", "CIRCLECI"):
         monkeypatch.delenv(key, raising=False)
 
@@ -69,6 +72,64 @@ def test_get_available_update_disabled_in_ci(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr(update_check, "get_version", lambda: "1.0.0")
     monkeypatch.setenv("CI", "true")
     assert update_check.get_available_update() is None
+
+
+def test_update_check_off_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    update_check._CACHE_PATH.write_text(
+        json.dumps({"latest_version": "9.9.9", "checked_at": time.time() - 3 * 24 * 60 * 60})
+    )
+    monkeypatch.setattr(update_check, "get_version", lambda: "1.0.0")
+    monkeypatch.delenv("STRIX_UPDATE_CHECK")
+    monkeypatch.setattr(update_check, "_refresh_cache", lambda: pytest.fail("network check ran"))
+
+    update_check.start_background_check()
+
+    assert update_check._background_thread is None
+    assert update_check.get_available_update() is None
+
+
+def test_no_update_check_overrides_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("STRIX_NO_UPDATE_CHECK", "1")
+    assert update_check._is_disabled() is True
+    monkeypatch.delenv("STRIX_NO_UPDATE_CHECK")
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    assert update_check._is_disabled() is True
+
+
+def test_update_sources_configurable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("STRIX_UPDATE_REPO", "acme/strix-fork")
+    monkeypatch.setenv("STRIX_UPDATE_PYPI_PACKAGE", "acme-strix")
+    assert update_check._github_repo() == "acme/strix-fork"
+    assert update_check._pypi_package() == "acme-strix"
+    assert update_check.get_upgrade_command("pip") == "pip install --upgrade acme-strix"
+
+    monkeypatch.setenv("STRIX_UPDATE_REPO", "../../evil?x=1")
+    monkeypatch.setenv("STRIX_UPDATE_PYPI_PACKAGE", "bad pkg; rm -rf")
+    assert update_check._github_repo() == update_check.DEFAULT_GITHUB_REPO
+    assert update_check._pypi_package() == update_check.DEFAULT_PYPI_PACKAGE
+
+
+def test_self_update_fails_closed_without_checksum(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(update_check, "_fetch_asset_digest", lambda *_: None)
+    monkeypatch.setattr(update_check.sys, "executable", str(tmp_path / "strix"))
+
+    def no_download(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("binary downloaded without a checksum")
+
+    monkeypatch.setattr(update_check.requests, "get", no_download)
+
+    with pytest.raises(RuntimeError, match="no published sha256"):
+        update_check._download_and_replace("1.1.0", "linux-x86_64", Console(file=io.StringIO()))
+
+    monkeypatch.setattr(update_check, "is_binary_install", lambda: True)
+    monkeypatch.setattr(update_check, "get_version", lambda: "1.0.0")
+    monkeypatch.setattr(platform, "system", lambda: "Linux")
+    monkeypatch.setattr(platform, "machine", lambda: "x86_64")
+    buffer = io.StringIO()
+    assert update_check.self_update(Console(file=buffer, width=200), version="1.1.0") is False
+    assert "no published sha256" in buffer.getvalue()
 
 
 def test_get_available_update_corrupt_cache(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import logging
 import urllib.parse
 from typing import TYPE_CHECKING, Any
@@ -8,15 +7,14 @@ from typing import TYPE_CHECKING, Any
 import requests
 
 from strix.config import load_settings
-from strix.skills import get_loaded_skill_names
 from strix.telemetry._common import (
     SEND_TIMEOUT,
-    SESSION_ID,
     base_props,
     exception_props,
     get_scan_phase,
     get_version,
     is_first_run,
+    model_provider,
 )
 
 
@@ -27,6 +25,28 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _SCARF_ENDPOINT = "https://strix.gateway.scarf.sh"
+
+# Scarf events travel as a URL query string, which ends up in gateway and proxy
+# access logs. Only these coarse, low-cardinality fields are ever sent: no
+# session id, usage volumes, cost, finding counts, provider tallies, or skills.
+_COARSE_FIELDS = frozenset(
+    {
+        "os",
+        "arch",
+        "python",
+        "model_provider",
+        "auth_mode",
+        "scan_mode",
+        "scan_type",
+        "interactive",
+        "has_instructions",
+        "first_run",
+        "exit_reason",
+        "error_type",
+        "phase",
+        "exception_type",
+    }
+)
 
 
 def _is_enabled() -> bool:
@@ -42,7 +62,11 @@ def _send(event: str, properties: dict[str, Any]) -> bool:
         version = str(props.pop("strix_version", get_version()) or "unknown")
         path = f"/{urllib.parse.quote(event, safe='')}/{urllib.parse.quote(version, safe='')}"
         query = urllib.parse.urlencode(
-            {k: ("" if v is None else str(v)) for k, v in props.items()},
+            {
+                k: ("" if v is None else str(v))[:64]
+                for k, v in props.items()
+                if k in _COARSE_FIELDS
+            },
         )
         url = f"{_SCARF_ENDPOINT}{path}"
         if query:
@@ -69,8 +93,7 @@ def start(
         "scan_started",
         {
             **base_props(),
-            "session": SESSION_ID,
-            "model": model or "unknown",
+            "model_provider": model_provider(model),
             "auth_mode": auth_mode or "api_key",
             "scan_mode": scan_mode or "unknown",
             "scan_type": "whitebox" if is_whitebox else "blackbox",
@@ -81,62 +104,18 @@ def start(
     )
 
 
-def finding(severity: str, cwe: str | None = None, is_cve: bool = False) -> None:
-    _send(
-        "finding_reported",
-        {
-            **base_props(),
-            "session": SESSION_ID,
-            "severity": severity.lower(),
-            "cwe": (cwe or "").strip().lower() or "unknown",
-            "is_cve": is_cve,
-        },
-    )
-
-
 def end(report_state: ReportState, exit_reason: str = "completed") -> None:
     if report_state.scarf_scan_ended_sent:
         return
     if report_state.scan_ended_exit_reason is None:
         report_state.scan_ended_exit_reason = exit_reason
 
-    vulnerabilities_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
-    for v in report_state.vulnerability_reports:
-        sev = v.get("severity", "info").lower()
-        if sev in vulnerabilities_counts:
-            vulnerabilities_counts[sev] += 1
-
-    duration = report_state.get_process_duration_seconds()
-
-    llm_props: dict[str, int | float] = {}
-    try:
-        usage = report_state.get_process_llm_usage()
-        if isinstance(usage, dict):
-            llm_props = {
-                "llm_requests": int(usage.get("requests") or 0),
-                "llm_input_tokens": int(usage.get("input_tokens") or 0),
-                "llm_output_tokens": int(usage.get("output_tokens") or 0),
-                "llm_tokens": int(usage.get("total_tokens") or 0),
-                "llm_cost": float(usage.get("cost") or 0.0),
-            }
-    except (TypeError, ValueError, AttributeError):
-        pass
-    providers = report_state.get_process_llm_providers()
-
     report_state.scarf_scan_ended_sent = _send(
         "scan_ended",
         {
             **base_props(),
-            "session": SESSION_ID,
             "auth_mode": report_state.run_record.get("auth_mode") or "api_key",
             "exit_reason": report_state.scan_ended_exit_reason,
-            "duration_seconds": round(duration),
-            "vulnerabilities_total": len(report_state.vulnerability_reports),
-            **{f"vulnerabilities_{k}": v for k, v in vulnerabilities_counts.items()},
-            **llm_props,
-            # Query params are flat, so the per-provider tally travels as JSON.
-            **({"llm_providers": json.dumps(providers)} if providers else {}),
-            "skills": ",".join(get_loaded_skill_names()),
         },
     )
 
@@ -144,7 +123,6 @@ def end(report_state: ReportState, exit_reason: str = "completed") -> None:
 def error(error_type: str, exc: BaseException | None = None) -> None:
     props: dict[str, Any] = {
         **base_props(),
-        "session": SESSION_ID,
         "error_type": error_type,
         "phase": get_scan_phase(),
     }

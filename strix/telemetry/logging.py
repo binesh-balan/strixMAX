@@ -59,6 +59,9 @@ _NOISY_LIBS: tuple[str, ...] = (
 )
 
 
+_PRIVATE_DIR_MODE = 0o700
+_PRIVATE_FILE_MODE = 0o600
+
 _HANDLER_TAG = "_strix_scan_handler"
 _STREAM_TAG = "_strix_stream_handler"
 
@@ -178,8 +181,15 @@ def setup_scan_logging(run_dir: Path, *, debug: bool | None = None) -> Callable[
 
     debug = _debug_enabled(debug)
 
-    run_dir.mkdir(parents=True, exist_ok=True)
+    # Logs can hold target details and model traffic, so a run directory and
+    # log file this call creates are private to the user (0700 / 0600).
+    if not run_dir.exists():
+        run_dir.parent.mkdir(parents=True, exist_ok=True)
+        run_dir.mkdir(mode=_PRIVATE_DIR_MODE, exist_ok=True)
     log_path = run_dir / "strix.log"
+    if not log_path.exists():
+        with contextlib.suppress(FileExistsError):
+            os.close(os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, _PRIVATE_FILE_MODE))
 
     file_handler = logging.FileHandler(log_path, mode="a", encoding="utf-8")
     file_handler.setLevel(logging.DEBUG)

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import ipaddress
 import json
 import sys
 import time
@@ -39,6 +40,17 @@ _MAX_POLL_INTERVAL_S = 60
 _MAX_EXPIRES_IN_S = 30 * 60
 
 _ROLE_RANK = {"viewer": 0, "analyst": 1, "admin": 2}
+
+
+def is_loopback_hostname(hostname: str) -> bool:
+    """True for ``localhost`` and loopback IP literals (127.0.0.0/8, ::1)."""
+    normalized = hostname.strip().strip("[]").lower().rstrip(".")
+    if normalized == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
 
 
 class PlatformAuthError(Exception):
@@ -198,6 +210,7 @@ def _run_device_flow(  # noqa: PLR0912, PLR0915
     device_name: str | None = None,
 ) -> dict[str, Any]:
     app_url = _app_url()
+    _require_secure_app_url(app_url)
     interactive = workspace is not None or (
         sys.stdin.isatty() and scopes is None and scope_profile is None
     )
@@ -352,6 +365,15 @@ def _require_api_token(record: dict[str, Any]) -> dict[str, Any]:
     return record
 
 
+def _require_secure_app_url(app_url: str) -> None:
+    """Refuse plain http to anything but this machine before any credential flows."""
+    parsed = urlsplit(app_url)
+    if parsed.scheme.lower() == "http" and not is_loopback_hostname(parsed.hostname or ""):
+        raise PlatformAuthError(
+            "the configured platform URL must use https (http is only allowed for localhost)"
+        )
+
+
 def _bind_login_record(record: dict[str, Any], app_url: str) -> dict[str, Any]:
     """Bind a stored credential to its issuer and preserve its scope preference."""
     parsed = urlsplit(app_url)
@@ -367,6 +389,7 @@ def _bind_login_record(record: dict[str, Any], app_url: str) -> dict[str, Any]:
         or "%" in parsed.netloc
     ):
         raise PlatformAuthError("the configured platform URL is invalid")
+    _require_secure_app_url(app_url)
     bound = dict(record)
     bound["app_url"] = urlunsplit(
         (parsed.scheme.lower(), parsed.netloc.lower(), parsed.path.rstrip("/"), "", "")
