@@ -211,3 +211,26 @@ def test_image_support_follows_the_catalog(monkeypatch: pytest.MonkeyPatch) -> N
     assert model_supports_images("acme-text") is False
     assert model_supports_images("litellm/openai/acme-vision") is True
     assert model_supports_images("acme-unknown-model") is True
+
+
+@pytest.mark.parametrize(
+    "model_name", ["anthropic/claude-opus-5-5", "anthropic/claude-sonnet-5-5", "claude-haiku-5-5"]
+)
+def test_supplemental_models_are_priced_and_reasoning_aware(
+    monkeypatch: pytest.MonkeyPatch, model_name: str
+) -> None:
+    bare = model_name.rsplit("/", 1)[-1]
+    monkeypatch.delitem(litellm.model_cost, bare, raising=False)
+    models._register_supplemental_models()
+    entry = litellm.model_cost[bare]
+    assert entry["litellm_provider"] == "anthropic"
+    assert entry["input_cost_per_token"] > 0
+    assert entry["max_output_tokens"] == 128000
+    assert models.model_supports_reasoning(model_name) is True
+
+
+def test_supplemental_models_do_not_override_litellm(monkeypatch: pytest.MonkeyPatch) -> None:
+    shipped = {"litellm_provider": "anthropic", "input_cost_per_token": 1.0}
+    monkeypatch.setitem(litellm.model_cost, "claude-opus-5-5", shipped)
+    models._register_supplemental_models()
+    assert litellm.model_cost["claude-opus-5-5"]["input_cost_per_token"] == 1.0

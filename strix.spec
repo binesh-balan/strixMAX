@@ -29,6 +29,9 @@ for xml_file in strix_root.rglob('*.xml'):
     rel_path = xml_file.relative_to(project_root)
     datas.append((str(xml_file), str(rel_path.parent)))
 
+# Model-map entries newer than the pinned LiteLLM (see strix/config/models.py).
+datas.append((str(strix_root / 'config' / 'litellm_model_supplement.json'), 'strix/config'))
+
 # Prebuilt local-viewer SPA (served by `strix view`).
 viewer_static = strix_root / 'interface' / 'viewer' / 'static'
 for asset in viewer_static.rglob('*'):
