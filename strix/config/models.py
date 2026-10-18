@@ -11,6 +11,7 @@ import os
 import time
 import uuid
 from collections.abc import AsyncGenerator
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from agents import (
@@ -782,8 +783,34 @@ def _configure_litellm_compatibility() -> None:
     litellm.disable_streaming_logging = False
     litellm.suppress_debug_info = True
 
+    _register_supplemental_models()
     _register_litellm_cost_callback()
     _install_openrouter_stream_cost_capture()
+
+
+_SUPPLEMENTAL_MODEL_MAP = Path(__file__).with_name("litellm_model_supplement.json")
+
+
+def _register_supplemental_models() -> None:
+    """Add model-map entries the pinned LiteLLM release predates.
+
+    The cost map is read from LiteLLM's bundled copy (no remote fetch), so a
+    model released after the pin is unknown to it: requests go out without
+    reasoning settings, capped at 4096 output tokens, and are priced at $0,
+    which leaves ``--max-budget`` unenforced. Entries are copied verbatim from
+    a later LiteLLM map and only fill gaps, so a LiteLLM upgrade that ships
+    its own entry takes precedence.
+    """
+    import litellm
+
+    try:
+        supplement = json.loads(_SUPPLEMENTAL_MODEL_MAP.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        logger.warning("Could not load %s", _SUPPLEMENTAL_MODEL_MAP.name)
+        return
+    missing = {name: entry for name, entry in supplement.items() if name not in litellm.model_cost}
+    if missing:
+        litellm.register_model(missing)
 
 
 # Agent ids are 8 hex characters and can repeat across runs; the session id
